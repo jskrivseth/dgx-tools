@@ -131,6 +131,16 @@ engine_run_container() {
     rope_args=(--rope-scaling "{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original}}")
   fi
 
+  # Only pass --max-model-len if dgxt actually resolved a value. If
+  # resolution failed for any reason (HF lookup unreachable/timed out,
+  # etc.), omit the flag entirely rather than passing an empty string --
+  # vllm serve crashes outright on `--max-model-len ''`. Omitting it
+  # lets vLLM derive its own default from the model's config.json itself
+  # (fetched from inside the container, which has its own working
+  # network path independent of whatever failed on the host side).
+  local max_len_args=()
+  [[ -n "$max_len" ]] && max_len_args=(--max-model-len "$max_len")
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -145,7 +155,7 @@ engine_run_container() {
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
-    --max-model-len "$max_len" \
+    "${max_len_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \

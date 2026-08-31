@@ -225,7 +225,7 @@ resolve_max_context_from_hf_repo() {
   local max_ctx=""
   if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     local config_json
-    config_json=$(curl -sfL "https://huggingface.co/${model}/raw/main/config.json" 2>/dev/null)
+    config_json=$(curl -sfL --max-time 10 "https://huggingface.co/${model}/raw/main/config.json" 2>/dev/null)
     if [[ -n "$config_json" ]]; then
       max_ctx=$(echo "$config_json" | python3 -c "
 import sys, json
