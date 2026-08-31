@@ -157,7 +157,10 @@ wait_for_ready() {
 
   docker logs -f "$container_name" 2>&1 &
   local log_pid=$!
-  trap 'kill "$log_pid" 2>/dev/null || true' RETURN
+  # Self-clearing: a RETURN trap isn't scoped to this function alone — left
+  # armed, it fires again on the caller's next return too, where $log_pid
+  # is out of scope (unbound under `set -u`). Clear it as its own first act.
+  trap 'kill "$log_pid" 2>/dev/null || true; trap - RETURN' RETURN
 
   local elapsed=0
   local timeout=900
