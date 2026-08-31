@@ -164,7 +164,12 @@ engine_run_container() {
   fi
   local reasoning_args=()
   if [[ -n "$reasoning_parser" ]]; then
-    reasoning_args=(--enable-reasoning --reasoning-parser "$reasoning_parser")
+    # --enable-reasoning was deprecated in vLLM v0.9.0 and removed in
+    # v0.10.0+ (which `vllm/vllm-openai:latest` now tracks) -- passing it
+    # makes `vllm serve` reject the whole command with "unrecognized
+    # arguments". Just --reasoning-parser now implicitly enables
+    # reasoning-content extraction.
+    reasoning_args=(--reasoning-parser "$reasoning_parser")
   fi
   # Set (as a bare global, not passed positionally) by cmd_start's
   # native-max-context check when the user explicitly confirmed they
