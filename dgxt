@@ -78,6 +78,16 @@ load_engine() {
     list_engine_files | sed 's/^/  /' >&2
     exit 1
   fi
+  # Safe defaults so `${!ENGINE_MODEL_VAR}`-style indirection never hits
+  # "invalid indirect expansion"/"invalid variable name" for a placeholder
+  # engine that hasn't defined these name-mappings yet (an empty string
+  # doesn't work as an indirection target either — must be a real,
+  # always-unset identifier). Real engines override these below.
+  ENGINE_MODEL_VAR="_DGXT_UNSET" ENGINE_MAX_LEN_VAR="_DGXT_UNSET"
+  ENGINE_API_KEY_VAR="_DGXT_UNSET" ENGINE_PORT_VAR="_DGXT_UNSET"
+  ENGINE_GPU_MEM_VAR="_DGXT_UNSET" ENGINE_TOOL_CALL_PARSER_VAR="_DGXT_UNSET"
+  ENGINE_DEFAULT_MODEL=""
+  ENGINE_DEFAULT_TOOL_CALL_PARSER=""
   # shellcheck source=/dev/null
   source "$file"
 }
@@ -119,6 +129,12 @@ cmd_engine() {
 # ---- Core commands (generic; delegate engine-specific pieces) -----------
 
 cmd_start() {
+  if [[ "${ENGINE_STATUS:-planned}" != "ready" ]]; then
+    echo "ERROR: '$CURRENT_ENGINE' is a placeholder — not implemented yet." >&2
+    echo "See lib/engines/vllm.sh for the reference pattern, or run 'dgxt engine' to pick a ready engine." >&2
+    return 1
+  fi
+
   ensure_docker
 
   if is_running "$ENGINE_CONTAINER_NAME"; then
@@ -156,6 +172,7 @@ cmd_start() {
 
   local port="${!ENGINE_PORT_VAR:-8000}"
   local gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
+  local tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$ENGINE_DEFAULT_TOOL_CALL_PARSER}"
   local api_key
   api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
   local api_key_was_unset=0
@@ -169,6 +186,7 @@ cmd_start() {
   echo "  GPU memory:     ${gpu_mem} (fraction)"
   echo "  Port:           $port"
   echo "  API key:        ${api_key:0:8}..."
+  echo "  Tool calling:   ${tool_call_parser:-disabled}"
   echo "  Image:          ${ENGINE_IMAGE:-n/a}"
   echo ""
   if [[ "$api_key_was_unset" -eq 1 ]]; then
@@ -196,7 +214,7 @@ cmd_start() {
   ensure_hub_cache || return 1
 
   echo "Starting container..."
-  engine_run_container "$model" "$max_len" "$port" "$gpu_mem" "$api_key"
+  engine_run_container "$model" "$max_len" "$port" "$gpu_mem" "$api_key" "$tool_call_parser"
 
   echo "Container started. Watching logs for model download/loading..."
   echo ""
@@ -216,11 +234,16 @@ cmd_config() {
   echo ""
   echo "--- Effective values (env > config > defaults) ---"
   printf "  %-20s %s\n" "DGXT_ENGINE:" "$CURRENT_ENGINE"
-  printf "  %-20s %s\n" "$ENGINE_MODEL_VAR:" "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
-  printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
-  printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; a random key is generated at start>}"
-  printf "  %-20s %s\n" "$ENGINE_PORT_VAR:" "${!ENGINE_PORT_VAR:-8000}"
-  printf "  %-20s %s\n" "$ENGINE_GPU_MEM_VAR:" "${!ENGINE_GPU_MEM_VAR:-0.8}"
+  if [[ "${ENGINE_STATUS:-planned}" != "ready" ]]; then
+    echo "  ('$CURRENT_ENGINE' is a placeholder — no engine-specific settings yet)"
+  else
+    printf "  %-20s %s\n" "$ENGINE_MODEL_VAR:" "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
+    printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+    printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; a random key is generated at start>}"
+    printf "  %-20s %s\n" "$ENGINE_PORT_VAR:" "${!ENGINE_PORT_VAR:-8000}"
+    printf "  %-20s %s\n" "$ENGINE_GPU_MEM_VAR:" "${!ENGINE_GPU_MEM_VAR:-0.8}"
+    printf "  %-20s %s\n" "$ENGINE_TOOL_CALL_PARSER_VAR:" "${!ENGINE_TOOL_CALL_PARSER_VAR:-${ENGINE_DEFAULT_TOOL_CALL_PARSER:-disabled}}"
+  fi
   printf "  %-20s %s\n" "HF_TOKEN:" "${HF_TOKEN:-(not set)}"
   printf "  %-20s %s\n" "HUB_CACHE:" "$HUB_CACHE"
   echo ""
@@ -238,12 +261,19 @@ cmd_config() {
 # "generate a default config" command too — just run it with no env vars
 # set for a fresh, all-defaults file.
 cmd_save() {
+  if [[ "${ENGINE_STATUS:-planned}" != "ready" ]]; then
+    echo "ERROR: '$CURRENT_ENGINE' is a placeholder — no engine-specific settings to save yet." >&2
+    echo "Run 'dgxt engine <name>' to switch to a ready engine first." >&2
+    return 1
+  fi
+
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
   local max_len="${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "$model")}"
   local api_key
   api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
   local port="${!ENGINE_PORT_VAR:-8000}"
   local gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
+  local tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$ENGINE_DEFAULT_TOOL_CALL_PARSER}"
   local hf_token="${HF_TOKEN:-}"
 
   {
@@ -269,6 +299,11 @@ cmd_save() {
     echo "# GPU memory fraction (0.0-1.0)"
     echo "$ENGINE_GPU_MEM_VAR=$gpu_mem"
     echo ""
+    echo "# Tool-call parser for agentic/function-calling clients (empty disables"
+    echo "# tool calling support entirely). Must match the model's tool-call output"
+    echo "# format: https://docs.vllm.ai/en/latest/features/tool_calling.html"
+    echo "$ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
+    echo ""
     echo "# HuggingFace token for gated models (or just run: hf auth login)"
     if [[ -n "$hf_token" ]]; then
       echo "HF_TOKEN=$hf_token"
@@ -287,6 +322,7 @@ cmd_save() {
   echo "  $ENGINE_API_KEY_VAR=$api_key"
   echo "  $ENGINE_PORT_VAR=$port"
   echo "  $ENGINE_GPU_MEM_VAR=$gpu_mem"
+  echo "  $ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
   [[ -n "$hf_token" ]] && echo "  HF_TOKEN=$hf_token"
 }
 

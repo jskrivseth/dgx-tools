@@ -19,6 +19,7 @@ ENGINE_MAX_LEN_VAR="VLLM_MAX_MODEL_LEN"
 ENGINE_API_KEY_VAR="VLLM_API_KEY"
 ENGINE_PORT_VAR="VLLM_PORT"
 ENGINE_GPU_MEM_VAR="VLLM_GPU_MEM"
+ENGINE_TOOL_CALL_PARSER_VAR="VLLM_TOOL_CALL_PARSER"
 
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
@@ -31,10 +32,23 @@ ENGINE_RECOMMENDED_MODELS=(
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
 )
 
+# vLLM's OpenAI-compatible server rejects any request with tool/function
+# definitions (as every agentic coding CLI sends) unless tool calling is
+# explicitly enabled with a parser matched to the model's tool-call output
+# format. All models recommended above are Qwen3-family, which emit
+# <tool_call>...</tool_call> XML — hence "qwen3_xml". Override
+# VLLM_TOOL_CALL_PARSER (or set it to empty) if serving a different model
+# family; see: https://docs.vllm.ai/en/latest/features/tool_calling.html
+ENGINE_DEFAULT_TOOL_CALL_PARSER="qwen3_xml"
+
 # Start the vLLM container. Called by the generic cmd_start in dgxt
-# after it has resolved model/max_len/port/gpu_mem/api_key.
+# after it has resolved model/max_len/port/gpu_mem/api_key/tool_call_parser.
 engine_run_container() {
-  local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5"
+  local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5" tool_call_parser="${6:-}"
+  local tool_args=()
+  if [[ -n "$tool_call_parser" ]]; then
+    tool_args=(--enable-auto-tool-choice --tool-call-parser "$tool_call_parser")
+  fi
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -50,5 +64,6 @@ engine_run_container() {
     vllm serve "$model" \
     --max-model-len "$max_len" \
     --gpu-memory-utilization "$gpu_mem" \
-    --api-key "$api_key"
+    --api-key "$api_key" \
+    "${tool_args[@]}"
 }
