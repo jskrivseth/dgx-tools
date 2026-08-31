@@ -14,12 +14,12 @@
 #
 # Quick start:
 #   dgxt setup                              Guided: pick engine, prereqs, hf auth, pick a model, start
-#   dgxt start [model] [--max-context N]    Start the current engine's container
+#   dgxt start [model] [--max-context N|Nk|Nm]    Start the current engine's container
 #
 # Commands:
-#   start [model] [--max-context N]    Start the container
+#   start [model] [--max-context N|Nk|Nm]    Start the container (e.g. 65536, 64k, 1m)
 #   stop                               Stop and remove the container
-#   restart [model] [--max-context N]  Stop then start
+#   restart [model] [--max-context N|Nk|Nm]  Stop then start
 #   logs                               Tail container logs
 #   status                             Show container state
 #   config                             Show effective configuration
@@ -183,14 +183,14 @@ cmd_start() {
   # above already confirmed it's not currently serving anything.
   docker rm -f "$ENGINE_CONTAINER_NAME" >/dev/null 2>&1 || true
 
-  # Parse args: model name, then --max-context [N]
+  # Parse args: model name, then --max-context [N|Nk|Nm]
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
   local max_len=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --max-context)
         if [[ -n "${2:-}" && "$2" != --* ]]; then
-          max_len="$2"
+          max_len=$(parse_context_size "$2")
           shift 2
         else
           max_len="auto"
@@ -204,7 +204,8 @@ cmd_start() {
     esac
   done
 
-  local max_len_var_val="${!ENGINE_MAX_LEN_VAR:-}"
+  local max_len_var_val
+  max_len_var_val=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
   if [[ -z "$max_len" ]]; then
     max_len="${max_len_var_val:-$(resolve_max_context "$model")}"
   elif [[ "$max_len" == "auto" ]]; then
@@ -235,7 +236,7 @@ cmd_start() {
   echo "Starting $ENGINE_NAME server:"
   echo "  Config file:    $DEFAULT_CONFIG_FILE $([ -f "$DEFAULT_CONFIG_FILE" ] && echo '(loaded)' || echo '(not found)')"
   echo "  Model:          $model"
-  engine_defines_var "$ENGINE_MAX_LEN_VAR" && echo "  Context:        $max_len tokens"
+  engine_defines_var "$ENGINE_MAX_LEN_VAR" && echo "  Context:        ${max_len:-auto (engine default)}${max_len:+ tokens}"
   engine_defines_var "$ENGINE_GPU_MEM_VAR" && echo "  GPU memory:     ${gpu_mem} (fraction)"
   echo "  Port:           $port"
   echo "  API key:        ${api_key:0:8}..."
@@ -292,7 +293,10 @@ cmd_config() {
   else
     printf "  %-20s %s\n" "$ENGINE_MODEL_VAR:" "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
     if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
-      printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+      local cfg_max_len
+      cfg_max_len=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
+      cfg_max_len="${cfg_max_len:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+      printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${cfg_max_len:-<unset; engine default applies>}"
     fi
     if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
       printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; ${ENGINE_API_KEY_HINT:-required, see engine docs}>}"
@@ -333,7 +337,10 @@ cmd_save() {
 
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
   local max_len=""
-  engine_defines_var "$ENGINE_MAX_LEN_VAR" && max_len="${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "$model")}"
+  if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
+    max_len=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
+    max_len="${max_len:-$(resolve_max_context "$model")}"
+  fi
   local api_key=""
   if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
     api_key="${!ENGINE_API_KEY_VAR:-}"

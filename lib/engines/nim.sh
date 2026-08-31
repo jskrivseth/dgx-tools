@@ -7,10 +7,14 @@
 #     image + a --model flag. "Model" below means an NGC image tag.
 #   - Requires `docker login nvcr.io` with an NGC API key before the image
 #     can even be pulled (separate from any HuggingFace auth).
-#   - No --max-model-len / --gpu-memory-utilization equivalents — each
-#     container auto-tunes itself for the detected GPU. See
-#     engine_defines_var()/ENGINE_API_KEY_EXTERNAL usage in dgxt for how
-#     these differences are handled generically.
+#   - No --gpu-memory-utilization equivalent — each container auto-tunes
+#     GPU memory for the detected hardware. It DOES support a context
+#     length override (NIM_MAX_MODEL_LEN), but unlike vLLM there's no
+#     reliable way for dgxt to auto-derive "the right" value (see
+#     resolve_max_context override below) since the model value here is
+#     an NGC image tag, not an HF repo id with a config.json to read.
+#     See engine_defines_var()/ENGINE_API_KEY_EXTERNAL in dgxt for how
+#     these per-engine differences are handled generically.
 #   - Only a small, NVIDIA-curated catalog of models exist as NIMs — there's
 #     no free-form "serve any HF model" option like vLLM. `dgxt search`
 #     queries NGC's public catalog search API directly (see engine_search
@@ -28,6 +32,25 @@ ENGINE_CONTAINER_NAME="nim-server"
 ENGINE_MODEL_VAR="NIM_IMAGE"
 ENGINE_API_KEY_VAR="NGC_API_KEY"
 ENGINE_PORT_VAR="NIM_PORT"
+ENGINE_MAX_LEN_VAR="NIM_MAX_MODEL_LEN"
+
+# NIM auto-selects a hardware "profile" per container that isn't
+# guaranteed to use the model's full native context — e.g. Qwen3-32B
+# (native 40960) can auto-select an 8192-token profile, which then
+# rejects any request wanting more, with an error that gives no hint
+# NIM_MAX_MODEL_LEN exists to fix it. Unlike lib/common.sh's HF-based
+# resolve_max_context (which vLLM uses), there's no reliable way to
+# derive the right number here since "model" is an NGC image tag, not an
+# HF repo id with a config.json to read — so this deliberately returns
+# empty (meaning: don't pass NIM_MAX_MODEL_LEN, let NIM's own profile
+# default apply) unless the user explicitly sets NIM_MAX_MODEL_LEN or
+# passes --max-context themselves. This shadows/overrides common.sh's
+# generic resolve_max_context, which would otherwise curl an invalid HF
+# repo id (the image tag) and silently fall back to a meaningless
+# hardcoded 131072.
+resolve_max_context() {
+  echo ""
+}
 
 # NGC_API_KEY is a real credential from ngc.nvidia.com, not something dgxt
 # can safely invent — auto-generating a random fallback (like vLLM's
@@ -63,11 +86,11 @@ NIM_WORKSPACE_DIR="${NIM_WORKSPACE_DIR:-$HOME/.local/share/nim/workspace}"
 NIM_DOCKER_CONFIG_DIR="${NIM_DOCKER_CONFIG_DIR:-$HOME/.config/dgx-tools/docker}"
 
 # Start the NIM container. Called by the generic cmd_start in dgxt after it
-# has resolved model/port/api_key — max_len/gpu_mem/tool_call_parser are
-# accepted for signature compatibility but unused (NIM has no equivalent
-# knobs; see the module comment above).
+# has resolved model/max_len/port/api_key — gpu_mem/tool_call_parser are
+# accepted for signature compatibility but unused (no equivalent knobs;
+# see the module comment above and resolve_max_context override).
 engine_run_container() {
-  local model="$1" _max_len="$2" port="$3" _gpu_mem="$4" ngc_api_key="$5" _tool_call_parser="${6:-}"
+  local model="$1" max_len="$2" port="$3" _gpu_mem="$4" ngc_api_key="$5" _tool_call_parser="${6:-}"
 
   mkdir -p "$NIM_CACHE_DIR" "$NIM_WORKSPACE_DIR" "$NIM_DOCKER_CONFIG_DIR"
   chmod -R a+w "$NIM_CACHE_DIR" "$NIM_WORKSPACE_DIR"
@@ -85,11 +108,15 @@ engine_run_container() {
     return 1
   fi
 
+  local max_len_args=()
+  [[ -n "$max_len" ]] && max_len_args=(-e "NIM_MAX_MODEL_LEN=$max_len")
+
   docker --config "$NIM_DOCKER_CONFIG_DIR" run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
     --shm-size=16GB \
     -e NGC_API_KEY="$ngc_api_key" \
+    "${max_len_args[@]}" \
     -v "${NIM_CACHE_DIR}:/opt/nim/.cache" \
     -v "${NIM_WORKSPACE_DIR}:/opt/nim/workspace" \
     -p "${port}:8000" \

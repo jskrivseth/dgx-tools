@@ -112,6 +112,10 @@ This walks through, in order:
 ./dgxt save                              # persist current settings to ~/.dgxtrc
 ```
 
+`--max-context` (and the underlying `VLLM_MAX_MODEL_LEN`/`NIM_MAX_MODEL_LEN`
+config vars) accept plain token counts or binary K/M shorthand: `64k` ==
+`65536`, `256k` == `262144`, `1m` == `1048576`.
+
 Once running, the server speaks the OpenAI-compatible API:
 
 ```bash
@@ -178,8 +182,10 @@ VLLM_GPU_MEM=0.8
 HF_TOKEN=hf_...
 ```
 
-NIM uses a different set of keys (no context-length/GPU-memory knobs — each
-container auto-tunes itself):
+NIM uses a different set of keys (no GPU-memory knob — each container
+auto-tunes GPU memory itself; it does support a context-length override,
+since NIM's auto-selected profile isn't always the model's full native
+context):
 
 ```bash
 # ~/.dgxtrc with DGXT_ENGINE=nim
@@ -187,6 +193,7 @@ DGXT_ENGINE=nim
 NIM_IMAGE=nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest
 NGC_API_KEY=<real key from org.ngc.nvidia.com/account/api-keys, with 'NGC Catalog' permission checked>
 NIM_PORT=8000
+# NIM_MAX_MODEL_LEN=64k   # optional -- unset lets NIM's own profile decide
 ```
 
 ## Engines

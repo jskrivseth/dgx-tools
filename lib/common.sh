@@ -195,6 +195,23 @@ resolve_api_key() {
   fi
 }
 
+# Parse a human-friendly context-length string like "64k", "256k", "1m"
+# (binary K/M, matching the existing 131072-for-"128k" convention already
+# used by this codebase's defaults) into a raw token-count integer. Plain
+# integers and "auto"/empty pass through unchanged. Used wherever a
+# max-context value is read from a CLI flag or config/env var, so users
+# can write --max-context 256k or VLLM_MAX_MODEL_LEN=1m instead of typing
+# out 262144/1048576.
+parse_context_size() {
+  local input="$1"
+  case "$input" in
+    auto|"") echo "$input" ;;
+    *[Kk]) echo $(( ${input%[Kk]} * 1024 )) ;;
+    *[Mm]) echo $(( ${input%[Mm]} * 1024 * 1024 )) ;;
+    *) echo "$input" ;;
+  esac
+}
+
 # Resolve a model's max context length from its actual config.json (the
 # same file the serving engine itself reads); falls back to 131072 if it
 # can't be found. Reads the repo file directly (not via `hf`) since it
