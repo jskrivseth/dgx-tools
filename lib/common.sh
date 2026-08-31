@@ -1,0 +1,271 @@
+# dgx-tools shared library — engine-agnostic helpers shared by every engine
+# module (Docker lifecycle, HF cache/CLI passthroughs, config file, API
+# key/context resolution). Sourced by dgxt; not meant to run directly.
+
+# ---- Config -------------------------------------------------------------
+DEFAULT_CONFIG_FILE="$HOME/.dgxtrc"
+
+# Match huggingface_hub's own cache resolution so dgxt and the `hf` CLI
+# always agree on where models live — shared across every engine.
+HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+
+# Load config file (key=value, one per line). Env vars already set in the
+# environment take priority and are left untouched.
+load_config() {
+  local config_file="${1:-$DEFAULT_CONFIG_FILE}"
+  if [[ -f "$config_file" ]]; then
+    while IFS='=' read -r key value; do
+      [[ "$key" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "$key" ]] && continue
+      key=$(echo "$key" | xargs)
+      value=$(echo "$value" | xargs)
+      # Only set if not already present in the environment, so real env vars win.
+      if [[ -z "${!key+x}" ]]; then
+        export "$key"="$value"
+      fi
+    done < "$config_file"
+  fi
+}
+
+# Set KEY=VALUE in $DEFAULT_CONFIG_FILE, creating the file and replacing any
+# existing line for KEY.
+save_config_value() {
+  local key="$1" value="$2"
+  touch "$DEFAULT_CONFIG_FILE"
+  if grep -q "^${key}=" "$DEFAULT_CONFIG_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$DEFAULT_CONFIG_FILE"
+  else
+    echo "${key}=${value}" >> "$DEFAULT_CONFIG_FILE"
+  fi
+}
+
+# ---- Prerequisites --------------------------------------------------------
+
+ensure_docker() {
+  if ! docker ps >/dev/null 2>&1; then
+    echo "Docker not accessible. Try: newgrp docker  (or log out/in), then re-run."
+    exit 1
+  fi
+}
+
+# Check that the `hf` CLI (huggingface_hub) is available. Everything
+# HuggingFace-related beyond this (search, download, cache management,
+# auth) is delegated straight to `hf` — this is the one place dgxt touches
+# HF tooling directly, and only to bootstrap it onto a fresh box.
+# If missing and running interactively, offers to install it via pip
+# (never installs silently/non-interactively — always asks first).
+ensure_hf_cli() {
+  if command -v hf >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "HuggingFace CLI ('hf') not found on PATH." >&2
+
+  if [[ ! -t 0 ]]; then
+    echo "Install it with:" >&2
+    echo "  pip3 install huggingface_hub" >&2
+    echo "  (add --break-system-packages if pip refuses due to PEP 668)" >&2
+    return 1
+  fi
+
+  local reply
+  read -rp "Install it now with pip3? [Y/n] " reply
+  if [[ "$reply" =~ ^[Nn] ]]; then
+    echo "Skipping. Install manually with: pip3 install huggingface_hub" >&2
+    return 1
+  fi
+
+  echo "Installing huggingface_hub..."
+  # Debian/Ubuntu's PEP 668 "externally-managed-environment" protection can
+  # make a plain `pip install` fail; retry with the override before giving
+  # up. Guarded by `if` so a failure here can't kill the script under `set -e`.
+  if ! pip3 install -q huggingface_hub 2>/dev/null; then
+    if ! pip3 install -q --break-system-packages huggingface_hub; then
+      echo "ERROR: pip install failed. Try manually:" >&2
+      echo "  pip3 install --break-system-packages huggingface_hub" >&2
+      return 1
+    fi
+  fi
+
+  if ! command -v hf >/dev/null 2>&1; then
+    echo "hf still not found on PATH after install." >&2
+    echo "It likely installed to ~/.local/bin — open a new shell and retry, or:" >&2
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
+    return 1
+  fi
+
+  echo "hf installed: $(command -v hf)"
+  return 0
+}
+
+# Make sure the HF cache dir exists and is writable, creating it if needed.
+# Must run BEFORE any `docker run` bind-mount of this path (see engine
+# modules), otherwise Docker (running the container as root) will
+# auto-create it as root on a fresh box and block every future non-container
+# write (hf download, model-pull, etc.) — the one recurring local gotcha.
+ensure_hub_cache() {
+  mkdir -p "$HUB_CACHE"
+  if [[ ! -w "$HUB_CACHE" ]]; then
+    echo "ERROR: $HUB_CACHE is not writable by $(whoami)."
+    echo "This usually happens when a container (running as root) wrote to"
+    echo "this bind-mounted directory first. Fix ownership with:"
+    echo "  sudo chown -R \"$(whoami)\":\"$(whoami)\" \"$HUB_CACHE\""
+    return 1
+  fi
+}
+
+# ---- Container lifecycle (generic — engines just supply a container name) -
+
+is_running() {
+  local container_name="$1"
+  docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null | grep -q "^${container_name}$"
+}
+
+cmd_stop() {
+  local container_name="$1"
+  ensure_docker
+  if ! is_running "$container_name"; then
+    echo "Container '$container_name' is not running."
+    return 0
+  fi
+  echo "Stopping container..."
+  docker stop "$container_name"
+  docker rm "$container_name"
+  echo "Stopped."
+}
+
+cmd_logs() {
+  local container_name="$1"
+  ensure_docker
+  if ! is_running "$container_name"; then
+    echo "Container '$container_name' is not running."
+    return 1
+  fi
+  docker logs -f "$container_name"
+}
+
+cmd_status() {
+  local container_name="$1"
+  ensure_docker
+  docker ps -a --filter "name=^${container_name}$" --format "table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+}
+
+# Stream a container's logs in the background, poll a health endpoint until
+# ready (or timeout), then clean up the log stream either way.
+wait_for_ready() {
+  local container_name="$1" port="$2"
+
+  docker logs -f "$container_name" 2>&1 &
+  local log_pid=$!
+  trap 'kill "$log_pid" 2>/dev/null || true' RETURN
+
+  local elapsed=0
+  local timeout=900
+  while [[ $elapsed -lt $timeout ]]; do
+    if curl -sf "http://localhost:${port}/health" >/dev/null 2>&1; then
+      kill "$log_pid" 2>/dev/null || true
+      echo ""
+      echo "Server is ready! (${elapsed}s) — listening on port ${port}."
+      echo "See the README for a curl example, or: dgxt logs"
+      return 0
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  kill "$log_pid" 2>/dev/null || true
+  echo "Timeout waiting for server. Check logs: dgxt logs"
+  return 1
+}
+
+# ---- Shared value resolution ---------------------------------------------
+
+# Get the value of $var_name, generating a random one if unset. Avoids ever
+# serving on the LAN with a fixed, widely-known default key.
+resolve_api_key() {
+  local var_name="$1"
+  local current="${!var_name:-}"
+  if [[ -n "$current" ]]; then
+    printf '%s' "$current"
+  else
+    openssl rand -hex 24 2>/dev/null || head -c 48 /dev/urandom | xxd -p | head -c 48
+  fi
+}
+
+# Resolve a model's max context length from its actual config.json (the
+# same file the serving engine itself reads); falls back to 131072 if it
+# can't be found. Reads the repo file directly (not via `hf`) since it
+# needs to work before a model is downloaded and without requiring `hf`.
+resolve_max_context() {
+  local model="$1"
+  local max_ctx=""
+  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    local config_json
+    config_json=$(curl -sfL "https://huggingface.co/${model}/raw/main/config.json" 2>/dev/null)
+    if [[ -n "$config_json" ]]; then
+      max_ctx=$(echo "$config_json" | python3 -c "
+import sys, json
+
+def find_key(obj, keys):
+    if isinstance(obj, dict):
+        for k in keys:
+            if isinstance(obj.get(k), int):
+                return obj[k]
+        for v in obj.values():
+            found = find_key(v, keys)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = find_key(v, keys)
+            if found is not None:
+                return found
+    return None
+
+try:
+    d = json.load(sys.stdin)
+    val = find_key(d, ['max_position_embeddings', 'seq_length', 'n_positions', 'max_sequence_length'])
+    if val is not None:
+        print(val)
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+  fi
+  echo "${max_ctx:-131072}"
+}
+
+# ---- HF passthroughs (engine-agnostic) ------------------------------------
+
+# Search HuggingFace models — passthrough to `hf models ls`. If the current
+# engine defines ENGINE_HF_APPS_FILTER, results are filtered to models
+# compatible with it.
+cmd_search() {
+  ensure_hf_cli || return 1
+  local query="${1:-}"
+  shift || true
+  if [[ -z "$query" ]]; then
+    read -rp "Search query: " query
+  fi
+  if [[ -n "${ENGINE_HF_APPS_FILTER:-}" ]]; then
+    hf models ls --search "$query" --apps "$ENGINE_HF_APPS_FILTER" --sort downloads "$@"
+  else
+    hf models ls --search "$query" --sort downloads "$@"
+  fi
+}
+
+# Download a model to the local HF cache — passthrough to `hf download`.
+# `hf` handles resuming/validating partial downloads itself; we only
+# guarantee the cache dir is writable first.
+cmd_model_pull() {
+  ensure_hf_cli || return 1
+  local model="${1:-${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}}"
+  ensure_hub_cache || return 1
+  hf download "$model"
+}
+
+# List downloaded models — passthrough to `hf cache ls`.
+cmd_model_list() {
+  ensure_hf_cli || return 1
+  hf cache ls
+}

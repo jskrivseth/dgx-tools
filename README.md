@@ -1,0 +1,211 @@
+# dgx-tools
+
+Get an LLM inference engine running on a fresh DGX Spark-class box (or
+similar single-GPU ARM64 NVIDIA workstation) as fast as possible — no
+native builds, no dependency wrangling beyond Docker and the official
+HuggingFace CLI.
+
+Currently implemented: **vLLM**. Placeholders exist for TensorRT-LLM,
+SGLang, llama.cpp, NIM, and Ollama (see [Engines](#engines) below).
+
+dgxt does **not** reimplement anything the `hf` CLI already does well —
+searching, downloading, cache management, and auth are all thin
+passthroughs to `hf`. dgxt's job is only the Docker lifecycle (start,
+stop, config) around whichever engine you pick.
+
+## Prerequisites
+
+This assumes a genuinely clean box — nothing pre-set-up, nothing assumed
+except what typically ships on a DGX Spark / DGX OS image:
+
+| Tool | Usually already present on DGX OS? | If missing |
+|---|---|---|
+| `docker` + NVIDIA Container Toolkit | Yes | See [NVIDIA Container Toolkit install docs](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| `python3` / `pip3` | Yes | `sudo apt install python3 python3-pip` |
+| `git` | Yes | `sudo apt install git` |
+| `hf` (HuggingFace CLI) | **No — dgxt offers to install it for you** | `pip3 install huggingface_hub`, or just say yes when prompted (see below) |
+
+dgxt checks for Docker and `hf` at runtime and tells you exactly what's
+missing. For `hf`, it goes one step further: if it's missing and you're
+running interactively, dgxt asks whether to install it via pip right then
+(it never installs anything silently/non-interactively).
+
+### Installing the `hf` CLI
+
+Not included with the OS. Any command that needs it (`setup`, `search`,
+`model-pull`, `model-list`, or `start` before a model is cached) will
+detect it's missing and prompt:
+
+```
+HuggingFace CLI ('hf') not found on PATH.
+Install it now with pip3? [Y/n]
+```
+
+Answer yes and dgxt installs it for you (retrying with
+`--break-system-packages` automatically if Debian/Ubuntu's PEP 668
+protection blocks the plain install). To install it yourself instead:
+
+```bash
+pip3 install huggingface_hub
+# or, if pip refuses with an externally-managed-environment error:
+pip3 install --break-system-packages huggingface_hub
+```
+
+Then confirm it's on your `PATH`:
+
+```bash
+hf --help
+```
+
+(If `hf` isn't found afterward, open a new shell — pip installs to
+`~/.local/bin`, which needs a fresh `PATH` to pick up.)
+
+### Docker group membership
+
+If `docker ps` gives a permission error, you're not (yet) in the `docker`
+group:
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker      # or just log out and back in
+```
+
+## Getting dgxt
+
+```bash
+git clone https://github.com/jskrivseth/dgx-tools.git ~/dgx-tools
+cd ~/dgx-tools
+./dgxt help
+```
+
+No build step, no install step — it's a single bash script (`dgxt`) plus
+a small `lib/` of sourced helpers. Optionally put it on your `PATH`:
+
+```bash
+ln -s ~/dgx-tools/dgxt ~/bin/dgxt   # if ~/bin is already on your PATH
+```
+
+## Quick start
+
+```bash
+./dgxt setup
+```
+
+This walks through, in order:
+1. **Engine selection** — defaults to `vllm` (the only implemented one today)
+2. **Docker check** — tells you the exact fix command if it's not accessible
+3. **HuggingFace auth** — checks `hf auth whoami`, offers to run `hf auth login` if not logged in, and mirrors the token into your config for the container to use
+4. **API key** — generates and saves a random key if you don't have one (never serves on the LAN with a fixed/guessable key)
+5. **Model pick** — shows a short list of recommended models for this hardware, or type your own HuggingFace model ID
+
+...then starts the container and streams logs until the server is healthy.
+
+## Everyday commands
+
+```bash
+./dgxt start [model] [--max-context N]   # start serving (default model/context if omitted)
+./dgxt stop                              # stop and remove the container
+./dgxt restart [model]                   # stop then start
+./dgxt logs                              # tail container logs
+./dgxt status                            # is it running?
+./dgxt config                            # show effective settings (file + env, merged)
+./dgxt save                              # persist current settings to ~/.dgxtrc
+```
+
+Once running, the server speaks the OpenAI-compatible API:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your VLLM_API_KEY>" \
+  -d '{"model":"<model>","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
+```
+
+## Not reimplemented — use `hf` directly
+
+dgxt only wraps three things as thin conveniences (so you don't need to
+remember `hf` flags just to get a model running); everything else is a
+direct passthrough:
+
+```bash
+./dgxt search <query>       # -> hf models ls --search <query> --sort downloads
+./dgxt model-pull <model>   # -> hf download <model>  (pre-fetch before starting)
+./dgxt model-list           # -> hf cache ls
+```
+
+For anything beyond that — browsing by author/params, verifying cache
+integrity, pruning incomplete downloads, switching HF accounts — just use
+`hf` directly:
+
+```bash
+hf models ls --search llama --num-parameters min:6B,max:32B --sort downloads
+hf cache ls
+hf cache prune          # clean up incomplete/orphaned downloads
+hf auth login / hf auth whoami
+```
+
+## Configuration
+
+Settings live in `~/.dgxtrc` (created by `dgxt save` or `dgxt setup`), as
+plain `KEY=value` lines. **Environment variables always take priority
+over the file** — export something and it wins, no editing required:
+
+```bash
+# ~/.dgxtrc
+DGXT_ENGINE=vllm
+VLLM_MODEL=Qwen/Qwen3-32B
+VLLM_MAX_MODEL_LEN=131072
+VLLM_API_KEY=<random, generated for you>
+VLLM_PORT=8000
+VLLM_GPU_MEM=0.8
+HF_TOKEN=hf_...
+```
+
+## Engines
+
+```bash
+./dgxt engine            # show current engine + list all, with status
+./dgxt engine <name>      # switch (persists to ~/.dgxtrc)
+```
+
+| Engine | Status |
+|---|---|
+| `vllm` | ready |
+| `tensorrt-llm` | planned |
+| `sglang` | planned |
+| `llama-cpp` | planned |
+| `nim` | planned |
+| `ollama` | planned |
+
+Adding a new engine means writing one small file in `lib/engines/`
+(see `lib/engines/vllm.sh` as the reference) — a handful of variables
+(container name, image, config-file variable names, recommended models)
+plus one function that runs `docker run`. Everything else — Docker
+lifecycle, health-check waiting, log streaming, HF passthroughs, config
+save/load, random API key generation — is shared in `lib/common.sh` and
+just works once the engine module is filled in.
+
+## Troubleshooting
+
+**"Docker not accessible"** — you're not in the `docker` group yet, or
+just joined it and haven't started a new shell. See
+[Docker group membership](#docker-group-membership) above.
+
+**Cache directory not writable** — usually means a container (running as
+root inside Docker) wrote to your HuggingFace cache directory before you
+did, leaving it root-owned. Fix:
+
+```bash
+sudo chown -R "$(whoami)":"$(whoami)" ~/.cache/huggingface
+```
+
+dgxt creates this directory itself (as your user) before every `docker
+run`, specifically to prevent this from happening on a fresh box — but it
+can still occur if you ran the container manually outside of dgxt first.
+
+**Gated model downloads failing** — you need to be logged in and have
+accepted the model's license on huggingface.co:
+
+```bash
+hf auth login
+```
