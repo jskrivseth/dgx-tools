@@ -34,7 +34,7 @@ ENGINE_PORT_VAR="NIM_PORT"
 # confusingly at `docker login`. See ENGINE_API_KEY_EXTERNAL handling in
 # dgxt's cmd_start/cmd_save/cmd_setup.
 ENGINE_API_KEY_EXTERNAL="1"
-ENGINE_API_KEY_HINT="Get one at: https://ngc.nvidia.com/setup/api-key"
+ENGINE_API_KEY_HINT="Generate one at https://org.ngc.nvidia.com/account/api-keys -> 'Generate Personal Key' -> under 'Key Permissions / Services Included', check 'NGC Catalog' (required for docker pull; 'Public API Endpoints' alone is NOT enough)."
 
 # Curated NIM images verified to exist for DGX Spark-class (GB10 ARM64
 # Blackwell) hardware as of this writing. NVIDIA's NIM catalog for ARM64
@@ -77,10 +77,10 @@ engine_run_container() {
   if ! echo "$ngc_api_key" | docker --config "$NIM_DOCKER_CONFIG_DIR" login nvcr.io --username '$oauthtoken' --password-stdin; then
     echo "" >&2
     echo "ERROR: docker login nvcr.io failed (see docker's error above)." >&2
-    echo "  Common causes: the key's scope doesn't include 'NGC Catalog'/container" >&2
-    echo "  registry access (check when generating it), or your account hasn't" >&2
-    echo "  accepted the EULA for this specific image yet — visit its NGC catalog" >&2
-    echo "  page and click 'Get Container' once. $ENGINE_API_KEY_HINT" >&2
+    echo "  Most likely: the key's Key Permissions don't include 'NGC Catalog'." >&2
+    echo "  $ENGINE_API_KEY_HINT" >&2
+    echo "  Also possible: your account hasn't accepted this specific image's EULA" >&2
+    echo "  yet — open its NGC catalog page and click 'Get Container' once." >&2
     return 1
   fi
 

@@ -173,7 +173,7 @@ container auto-tunes itself):
 # ~/.dgxtrc with DGXT_ENGINE=nim
 DGXT_ENGINE=nim
 NIM_IMAGE=nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest
-NGC_API_KEY=<your real key from ngc.nvidia.com/setup/api-key>
+NGC_API_KEY=<real key from org.ngc.nvidia.com/account/api-keys, with 'NGC Catalog' permission checked>
 NIM_PORT=8000
 ```
 
