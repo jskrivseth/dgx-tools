@@ -158,6 +158,8 @@ cmd_start() {
   local gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
   local api_key
   api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
+  local api_key_was_unset=0
+  [[ -z "${!ENGINE_API_KEY_VAR:-}" ]] && api_key_was_unset=1
 
   echo ""
   echo "Starting $ENGINE_NAME server:"
@@ -169,9 +171,12 @@ cmd_start() {
   echo "  API key:        ${api_key:0:8}..."
   echo "  Image:          ${ENGINE_IMAGE:-n/a}"
   echo ""
-  if [[ -z "${!ENGINE_API_KEY_VAR:-}" ]]; then
-    echo "NOTE: No $ENGINE_API_KEY_VAR configured — generated a random key for this run."
-    echo "      Run 'dgxt save' to persist it in $DEFAULT_CONFIG_FILE."
+  if [[ "$api_key_was_unset" -eq 1 ]]; then
+    # Persist immediately — otherwise a later `dgxt save`/`setup`/`start`
+    # would independently generate a *different* random key, permanently
+    # diverging from whatever this container is actually running with.
+    save_config_value "$ENGINE_API_KEY_VAR" "$api_key"
+    echo "NOTE: No $ENGINE_API_KEY_VAR configured — generated and saved a new key to $DEFAULT_CONFIG_FILE."
     echo ""
   fi
 
