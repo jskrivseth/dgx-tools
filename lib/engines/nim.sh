@@ -53,6 +53,14 @@ ENGINE_RECOMMENDED_MODELS=(
 NIM_CACHE_DIR="${NIM_CACHE_DIR:-$HOME/.cache/nim}"
 NIM_WORKSPACE_DIR="${NIM_WORKSPACE_DIR:-$HOME/.local/share/nim/workspace}"
 
+# Use a dgxt-private Docker config dir for nvcr.io auth instead of the
+# user's default ~/.docker/config.json. Some machines (e.g. ones with
+# NVIDIA AI Workbench installed) configure a global credHelper for
+# nvcr.io that can be broken/misconfigured independent of dgxt entirely —
+# this sidesteps that class of problem completely rather than requiring
+# users to debug or edit their global Docker credential setup.
+NIM_DOCKER_CONFIG_DIR="${NIM_DOCKER_CONFIG_DIR:-$HOME/.config/dgx-tools/docker}"
+
 # Start the NIM container. Called by the generic cmd_start in dgxt after it
 # has resolved model/port/api_key — max_len/gpu_mem/tool_call_parser are
 # accepted for signature compatibility but unused (NIM has no equivalent
@@ -60,13 +68,13 @@ NIM_WORKSPACE_DIR="${NIM_WORKSPACE_DIR:-$HOME/.local/share/nim/workspace}"
 engine_run_container() {
   local model="$1" _max_len="$2" port="$3" _gpu_mem="$4" ngc_api_key="$5" _tool_call_parser="${6:-}"
 
-  mkdir -p "$NIM_CACHE_DIR" "$NIM_WORKSPACE_DIR"
+  mkdir -p "$NIM_CACHE_DIR" "$NIM_WORKSPACE_DIR" "$NIM_DOCKER_CONFIG_DIR"
   chmod -R a+w "$NIM_CACHE_DIR" "$NIM_WORKSPACE_DIR"
 
   # docker login is itself idempotent/fast, so just always run it rather
-  # than trying (unreliably) to detect prior auth from ~/.docker/config.json.
+  # than trying (unreliably) to detect prior auth from config.json.
   echo "Logging in to nvcr.io..."
-  if ! echo "$ngc_api_key" | docker login nvcr.io --username '$oauthtoken' --password-stdin; then
+  if ! echo "$ngc_api_key" | docker --config "$NIM_DOCKER_CONFIG_DIR" login nvcr.io --username '$oauthtoken' --password-stdin; then
     echo "" >&2
     echo "ERROR: docker login nvcr.io failed (see docker's error above)." >&2
     echo "  Common causes: the key's scope doesn't include 'NGC Catalog'/container" >&2
@@ -76,7 +84,7 @@ engine_run_container() {
     return 1
   fi
 
-  docker run -d \
+  docker --config "$NIM_DOCKER_CONFIG_DIR" run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
     --shm-size=16GB \
