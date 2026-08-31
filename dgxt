@@ -94,6 +94,12 @@ load_engine() {
   # auto-generated; ENGINE_API_KEY_HINT is the guidance shown when it's unset.
   ENGINE_API_KEY_EXTERNAL="0"
   ENGINE_API_KEY_HINT=""
+  # Whether this engine can actually extend a model past its native
+  # context via RoPE scaling (see cmd_start's native-max-context check) --
+  # only vLLM supports this today. Engines that can't (e.g. NIM, whose
+  # precompiled DGX-Spark engines have no such knob) get an honest "this
+  # won't really work" note instead of a silent no-op bypass.
+  ENGINE_SUPPORTS_ROPE_SCALING="0"
   # shellcheck source=/dev/null
   source "$file"
 }
@@ -213,10 +219,10 @@ cmd_start() {
       max_len="$max_len_var_val"
       max_len_explicit=1
     else
-      max_len=$(resolve_max_context "$model")
+      max_len=$(resolve_default_context "$model")
     fi
   elif [[ "$max_len" == "auto" ]]; then
-    max_len=$(resolve_max_context "$model")
+    max_len=$(resolve_default_context "$model")
   fi
 
   # If the context length was explicitly requested (CLI flag or a
@@ -226,9 +232,11 @@ cmd_start() {
   # deep in container logs after a slow model load anyway, with a real
   # risk of "incorrect output or CUDA errors" if bypassed blindly --
   # this is the same check vLLM's own validator enforces, just surfaced
-  # immediately instead of after a wasted startup attempt. NIM's
-  # resolve_max_context always returns empty (see nim.sh), so this
-  # naturally only fires for engines that can derive a real native value.
+  # immediately instead of after a wasted startup attempt. Only fires
+  # when resolve_max_context can derive a real native value for this
+  # model (empty means "unknown" — e.g. an unmapped NIM image — and is
+  # deliberately not warned about, since there's nothing to compare
+  # against).
   if [[ "$max_len_explicit" == "1" && "$max_len" =~ ^[0-9]+$ ]]; then
     local native_max
     native_max=$(resolve_max_context "$model")
@@ -241,6 +249,31 @@ cmd_start() {
         return 1
       fi
       ALLOW_LONG_MAX_MODEL_LEN=1
+      if [[ "${ENGINE_SUPPORTS_ROPE_SCALING:-0}" == "1" ]]; then
+        # Genuinely extend context via YaRN RoPE scaling rather than just
+        # disabling the safety check — without this, tokens past
+        # native_max are out-of-distribution and produce degraded output
+        # regardless of the bypass above. Factor/original_max here use
+        # the model's own reported native max as the scaling base, which
+        # is a reasonable machine-discoverable default but may not match
+        # a model author's specifically-validated value (e.g. Qwen's own
+        # docs recommend 32768 as the YaRN base for Qwen3 dense models,
+        # not their extended config.json default of 40960) — override
+        # with VLLM_ROPE_SCALING_FACTOR/VLLM_ROPE_SCALING_ORIGINAL_MAX if
+        # you know a better value for this specific model.
+        ROPE_SCALING_ORIGINAL_MAX="$native_max"
+        ROPE_SCALING_FACTOR=$(awk -v m="$max_len" -v n="$native_max" 'BEGIN { f = m / n; printf (f == int(f)) ? "%d" : "%.2f", f }')
+        echo "  Applying YaRN RoPE scaling: factor=${ROPE_SCALING_FACTOR}, original_max=${native_max}."
+        echo "  (override via VLLM_ROPE_SCALING_FACTOR / VLLM_ROPE_SCALING_ORIGINAL_MAX if you know"
+        echo "  a better-validated value for this model)"
+      else
+        echo "  NOTE: '$CURRENT_ENGINE' has no RoPE-scaling override available through dgxt —"
+        echo "  this bypass only disables a safety check, it does NOT actually extend usable"
+        echo "  context. For NIM specifically, a precompiled hardware-optimized engine's context"
+        echo "  is baked in at NVIDIA's build time and literally cannot be changed at all,"
+        echo "  regardless of this setting. Switch to vLLM ('dgxt engine vllm') for genuine"
+        echo "  context extension via YaRN."
+      fi
     fi
   fi
 
@@ -327,7 +360,7 @@ cmd_config() {
     if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
       local cfg_max_len
       cfg_max_len=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
-      cfg_max_len="${cfg_max_len:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+      cfg_max_len="${cfg_max_len:-$(resolve_default_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
       printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${cfg_max_len:-<unset; engine default applies>}"
     fi
     if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
@@ -371,7 +404,7 @@ cmd_save() {
   local max_len=""
   if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
     max_len=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
-    max_len="${max_len:-$(resolve_max_context "$model")}"
+    max_len="${max_len:-$(resolve_default_context "$model")}"
   fi
   local api_key=""
   if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then

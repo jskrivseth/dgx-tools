@@ -114,11 +114,32 @@ This walks through, in order:
 
 `--max-context` (and the underlying `VLLM_MAX_MODEL_LEN`/`NIM_MAX_MODEL_LEN`
 config vars) accept plain token counts or binary K/M shorthand: `64k` ==
-`65536`, `256k` == `262144`, `1m` == `1048576`. If you explicitly request
-more than a model's real native context (vLLM only — checked against the
-model's own config.json), dgxt warns and asks before starting, since
-exceeding it risks incorrect output or CUDA errors; confirming sets
-`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` for you.
+`65536`, `256k` == `262144`, `1m` == `1048576`.
+
+**Default context (no flag/config value set)**: dgxt aims for 256K tokens,
+capped to whatever the model actually natively supports (checked against
+the model's own `config.json`) — a long-context model gets the full 256K
+automatically, while a shorter-context model safely falls back to its own
+real ceiling instead of silently over-requesting.
+
+**Explicitly requesting more than a model's native max**: dgxt warns and
+asks before starting, since exceeding it risks incorrect output or CUDA
+errors. On confirmation:
+- **vLLM**: genuinely extends context via YaRN RoPE scaling
+  (`--rope-scaling`), not just a bypass flag — the factor/original-max are
+  auto-computed from the model's native max, and `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`
+  is also set. Override with `VLLM_ROPE_SCALING_FACTOR` /
+  `VLLM_ROPE_SCALING_ORIGINAL_MAX` if you know a better-validated value for
+  a specific model (e.g. Qwen's own docs recommend `32768` as the YaRN base
+  for Qwen3 dense models, not their extended `config.json` default).
+- **NIM**: no equivalent exists. Many DGX-Spark NIM containers ship a
+  precompiled, hardware-optimized engine with context baked in at
+  NVIDIA's build time — `NIM_MAX_MODEL_LEN` only has any effect at all on
+  locally-*buildable* TensorRT-LLM profiles (per NVIDIA's own docs), and
+  even then there's no RoPE-scaling override available. dgxt tells you
+  this plainly rather than pretending the bypass fixed anything; switch to
+  vLLM (`dgxt engine vllm`) if you need genuine context extension past a
+  model's native max.
 
 Once running, the server speaks the OpenAI-compatible API:
 

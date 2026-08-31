@@ -13,6 +13,11 @@ ENGINE_STATUS="ready"
 ENGINE_CONTAINER_NAME="vllm-server"
 ENGINE_IMAGE="vllm/vllm-openai:latest"
 ENGINE_HF_APPS_FILTER="vllm"
+# vLLM can genuinely extend a model past its native context via YaRN RoPE
+# scaling (unlike NIM's precompiled engines, which have no such knob) --
+# see engine_run_container's rope_args and cmd_start's native-max-context
+# check in dgxt for how this gets triggered.
+ENGINE_SUPPORTS_ROPE_SCALING="1"
 
 # Config file env var names this engine reads/writes (kept as the original
 # VLLM_* names for continuity with existing ~/.vllmrc-based configs).
@@ -110,6 +115,22 @@ engine_run_container() {
   # want to exceed the model's derived native context length.
   local allow_long_env=()
   [[ "${ALLOW_LONG_MAX_MODEL_LEN:-0}" == "1" ]] && allow_long_env=(-e "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+
+  # Real YaRN RoPE-scaling context extension (not just the validator
+  # bypass above). Without this, tokens past the model's actual trained
+  # position range are simply out-of-distribution -- YaRN interpolates
+  # position embeddings so the model can meaningfully attend beyond its
+  # native range. Set as bare globals by cmd_start's native-max-context
+  # check (auto-computed from the requested/native ratio), or settable
+  # directly for manual control. See:
+  # https://qwen.readthedocs.io/en/latest/deployment/vllm.html#context-length
+  local rope_args=()
+  local rope_factor="${VLLM_ROPE_SCALING_FACTOR:-${ROPE_SCALING_FACTOR:-}}"
+  if [[ -n "$rope_factor" ]]; then
+    local rope_original="${VLLM_ROPE_SCALING_ORIGINAL_MAX:-${ROPE_SCALING_ORIGINAL_MAX:-}}"
+    rope_args=(--rope-scaling "{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original}}")
+  fi
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -127,5 +148,6 @@ engine_run_container() {
     --max-model-len "$max_len" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
-    "${tool_args[@]}"
+    "${tool_args[@]}" \
+    "${rope_args[@]}"
 }

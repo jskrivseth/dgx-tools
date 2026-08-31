@@ -266,6 +266,37 @@ resolve_max_context() {
   resolve_max_context_from_hf_repo "$1"
 }
 
+# Preferred default context length when nothing else specifies one (no
+# --max-context flag, no persisted VLLM_MAX_MODEL_LEN/NIM_MAX_MODEL_LEN).
+# 256K is a reasonable "aim high" target for agentic-coding workloads
+# (large repos, tool output, long multi-turn sessions) without forcing
+# every model to this value regardless of what it actually supports.
+DEFAULT_PREFERRED_CONTEXT=262144
+
+# The actual "auto" resolution used by cmd_start/cmd_save/cmd_config when
+# no explicit context was requested: aim for DEFAULT_PREFERRED_CONTEXT,
+# but never silently exceed what the model actually supports (its real
+# derived native max from resolve_max_context) — so a long-context model
+# (e.g. nvidia/Qwen3.6-35B-A3B-NVFP4, native 262144) gets the full 256K
+# automatically, while a shorter-context model (e.g. Qwen3-32B, native
+# 40960) safely falls back to its own real ceiling instead of requesting
+# more than it can serve. If the native max is unknown (resolve_max_context
+# returns empty — e.g. an unmapped NIM image), this also returns empty
+# rather than guessing, matching resolve_max_context's own "don't guess"
+# convention.
+resolve_default_context() {
+  local model="$1"
+  local native_max
+  native_max=$(resolve_max_context "$model")
+  if [[ -z "$native_max" ]]; then
+    echo ""
+  elif [[ "$native_max" =~ ^[0-9]+$ ]] && (( native_max < DEFAULT_PREFERRED_CONTEXT )); then
+    echo "$native_max"
+  else
+    echo "$DEFAULT_PREFERRED_CONTEXT"
+  fi
+}
+
 # True if the current engine actually maps this setting to a real config
 # var name (vs. load_engine()'s "_DGXT_UNSET" placeholder sentinel). Some
 # settings (context length, GPU memory fraction, tool-call parser) don't
