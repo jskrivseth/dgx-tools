@@ -159,5 +159,7 @@ engine_run_container() {
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \
-    "${rope_args[@]}"
+    "${rope_args[@]}" \
+    --enable-reasoning \
+    --reasoning-parser qwen3
 }
