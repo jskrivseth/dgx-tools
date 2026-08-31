@@ -36,10 +36,64 @@ ENGINE_RECOMMENDED_MODELS=(
 # definitions (as every agentic coding CLI sends) unless tool calling is
 # explicitly enabled with a parser matched to the model's tool-call output
 # format. All models recommended above are Qwen3-family, which emit
-# <tool_call>...</tool_call> XML — hence "qwen3_xml". Override
+# <tool_call>...</tool_call> XML — hence "qwen3_xml". This is only used as
+# a last-resort fallback (see resolve_tool_call_parser below); override
 # VLLM_TOOL_CALL_PARSER (or set it to empty) if serving a different model
 # family; see: https://docs.vllm.ai/en/latest/features/tool_calling.html
 ENGINE_DEFAULT_TOOL_CALL_PARSER="qwen3_xml"
+
+# Best-effort auto-detection of the right --tool-call-parser for a given
+# model. There's no official/automatic way to do this: HuggingFace has no
+# standard "tool call format" field, and vLLM itself has no auto-detect
+# mode — it requires an explicit --tool-call-parser matched to a
+# hand-maintained model-family table (see the docs link above). This
+# mirrors that table, keyed off the model's own config.json
+# "architectures" field (the same file the engine itself reads), so
+# plugging in a non-default model still gets a sensible parser without
+# manual lookup. Falls back to ENGINE_DEFAULT_TOOL_CALL_PARSER only when
+# detection can't run at all (e.g. no network); returns empty (tool
+# calling disabled) for a recognized-but-unmapped architecture, since
+# guessing wrong silently produces malformed tool calls at runtime rather
+# than a clean, obvious failure.
+resolve_tool_call_parser() {
+  local model="$1"
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "$ENGINE_DEFAULT_TOOL_CALL_PARSER"
+    return
+  fi
+
+  local config_json
+  config_json=$(curl -sfL "https://huggingface.co/${model}/raw/main/config.json" 2>/dev/null)
+  if [[ -z "$config_json" ]]; then
+    echo "$ENGINE_DEFAULT_TOOL_CALL_PARSER"
+    return
+  fi
+
+  local arch
+  arch=$(echo "$config_json" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    archs = d.get('architectures') or []
+    print(archs[0] if archs else '')
+except Exception:
+    pass
+" 2>/dev/null)
+
+  case "$arch" in
+    *Qwen3Coder*|*Qwen3_5Moe*|*Qwen3Moe*|*Qwen3*) echo "qwen3_xml" ;;
+    *Qwen2*) echo "hermes" ;;
+    *Llama4*) echo "llama4_pythonic" ;;
+    *Llama*) echo "llama3_json" ;;
+    *Mistral*|*Mixtral*) echo "mistral" ;;
+    *Granite*) echo "granite" ;;
+    *InternLM*) echo "internlm" ;;
+    *Jamba*) echo "jamba" ;;
+    *GptOss*|*GPTOss*) echo "openai" ;;
+    *Glm4*) echo "glm45" ;;
+    *) echo "" ;;
+  esac
+}
 
 # Start the vLLM container. Called by the generic cmd_start in dgxt
 # after it has resolved model/max_len/port/gpu_mem/api_key/tool_call_parser.

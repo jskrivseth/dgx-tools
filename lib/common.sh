@@ -238,6 +238,19 @@ except Exception:
   echo "${max_ctx:-131072}"
 }
 
+# Delegates to the current engine module's own resolve_tool_call_parser()
+# if it defines one (only vllm.sh does today — parser names/detection are
+# engine-specific). Falls back to ENGINE_DEFAULT_TOOL_CALL_PARSER (or
+# disabled) for engines that don't implement this.
+resolve_tool_call_parser_for_engine() {
+  local model="$1"
+  if declare -f resolve_tool_call_parser >/dev/null 2>&1; then
+    resolve_tool_call_parser "$model"
+  else
+    echo "${ENGINE_DEFAULT_TOOL_CALL_PARSER:-}"
+  fi
+}
+
 # ---- HF passthroughs (engine-agnostic) ------------------------------------
 
 # Search HuggingFace models — passthrough to `hf models ls`. If the current
