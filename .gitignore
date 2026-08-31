@@ -6,3 +6,6 @@
 # dgx-tools never writes config inside the repo (it always uses
 # $HOME/.dgxtrc), but ignore one defensively in case of local testing.
 .dgxtrc
+
+# Benchmarks with local secrets
+bench_api.py
