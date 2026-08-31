@@ -87,8 +87,10 @@ load_engine() {
   ENGINE_MODEL_VAR="_DGXT_UNSET" ENGINE_MAX_LEN_VAR="_DGXT_UNSET"
   ENGINE_API_KEY_VAR="_DGXT_UNSET" ENGINE_PORT_VAR="_DGXT_UNSET"
   ENGINE_GPU_MEM_VAR="_DGXT_UNSET" ENGINE_TOOL_CALL_PARSER_VAR="_DGXT_UNSET"
+  ENGINE_REASONING_PARSER_VAR="_DGXT_UNSET"
   ENGINE_DEFAULT_MODEL=""
   ENGINE_DEFAULT_TOOL_CALL_PARSER=""
+  ENGINE_DEFAULT_REASONING_PARSER=""
   # ENGINE_API_KEY_EXTERNAL=1 means this engine's API key must come from an
   # external service (e.g. NIM's NGC_API_KEY) and should never be
   # auto-generated; ENGINE_API_KEY_HINT is the guidance shown when it's unset.
@@ -280,6 +282,7 @@ cmd_start() {
   local port="${!ENGINE_PORT_VAR:-8000}"
   local gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
   local tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "$model")}"
+  local reasoning_parser="${!ENGINE_REASONING_PARSER_VAR:-$(resolve_reasoning_parser_for_engine "$model")}"
   local api_key api_key_was_unset=0
   if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
     # This engine's "API key" comes from an external service (not
@@ -306,6 +309,7 @@ cmd_start() {
   echo "  Port:           $port"
   echo "  API key:        ${api_key:0:8}..."
   engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && echo "  Tool calling:   ${tool_call_parser:-disabled}"
+  engine_defines_var "$ENGINE_REASONING_PARSER_VAR" && echo "  Reasoning:      ${reasoning_parser:-disabled}"
   echo "  Image:          ${ENGINE_IMAGE:-n/a}"
   echo ""
   if [[ "$api_key_was_unset" -eq 1 ]]; then
@@ -333,7 +337,7 @@ cmd_start() {
   ensure_hub_cache || return 1
 
   echo "Starting container..."
-  engine_run_container "$model" "$max_len" "$port" "$gpu_mem" "$api_key" "$tool_call_parser"
+  engine_run_container "$model" "$max_len" "$port" "$gpu_mem" "$api_key" "$tool_call_parser" "$reasoning_parser"
 
   echo "Container started. Watching logs for model download/loading..."
   echo ""
@@ -376,6 +380,10 @@ cmd_config() {
       local cfg_tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
       printf "  %-20s %s\n" "$ENGINE_TOOL_CALL_PARSER_VAR:" "${cfg_tool_call_parser:-disabled}"
     fi
+    if engine_defines_var "$ENGINE_REASONING_PARSER_VAR"; then
+      local cfg_reasoning_parser="${!ENGINE_REASONING_PARSER_VAR:-$(resolve_reasoning_parser_for_engine "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+      printf "  %-20s %s\n" "$ENGINE_REASONING_PARSER_VAR:" "${cfg_reasoning_parser:-disabled}"
+    fi
   fi
   printf "  %-20s %s\n" "HF_TOKEN:" "${HF_TOKEN:-(not set)}"
   printf "  %-20s %s\n" "HUB_CACHE:" "$HUB_CACHE"
@@ -417,6 +425,8 @@ cmd_save() {
   engine_defines_var "$ENGINE_GPU_MEM_VAR" && gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
   local tool_call_parser=""
   engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "$model")}"
+  local reasoning_parser=""
+  engine_defines_var "$ENGINE_REASONING_PARSER_VAR" && reasoning_parser="${!ENGINE_REASONING_PARSER_VAR:-$(resolve_reasoning_parser_for_engine "$model")}"
   local hf_token="${HF_TOKEN:-}"
 
   {
@@ -458,6 +468,13 @@ cmd_save() {
       echo "$ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
       echo ""
     fi
+    if engine_defines_var "$ENGINE_REASONING_PARSER_VAR"; then
+      echo "# Reasoning/chain-of-thought parser (empty disables --enable-reasoning"
+      echo "# entirely). Must match the model's reasoning output format:"
+      echo "# https://docs.vllm.ai/en/latest/features/reasoning_outputs.html"
+      echo "$ENGINE_REASONING_PARSER_VAR=$reasoning_parser"
+      echo ""
+    fi
     echo "# HuggingFace token for gated models (or just run: hf auth login)"
     if [[ -n "$hf_token" ]]; then
       echo "HF_TOKEN=$hf_token"
@@ -477,6 +494,7 @@ cmd_save() {
   echo "  $ENGINE_PORT_VAR=$port"
   engine_defines_var "$ENGINE_GPU_MEM_VAR" && echo "  $ENGINE_GPU_MEM_VAR=$gpu_mem"
   engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && echo "  $ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
+  engine_defines_var "$ENGINE_REASONING_PARSER_VAR" && echo "  $ENGINE_REASONING_PARSER_VAR=$reasoning_parser"
   [[ -n "$hf_token" ]] && echo "  HF_TOKEN=$hf_token"
 }
 

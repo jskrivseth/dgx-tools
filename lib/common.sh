@@ -321,6 +321,18 @@ resolve_tool_call_parser_for_engine() {
   fi
 }
 
+# Same idea, for --reasoning-parser (only vllm.sh implements
+# resolve_reasoning_parser today). Falls back to
+# ENGINE_DEFAULT_REASONING_PARSER (or disabled) for engines that don't.
+resolve_reasoning_parser_for_engine() {
+  local model="$1"
+  if declare -f resolve_reasoning_parser >/dev/null 2>&1; then
+    resolve_reasoning_parser "$model"
+  else
+    echo "${ENGINE_DEFAULT_REASONING_PARSER:-}"
+  fi
+}
+
 # ---- Model search/passthroughs (engine-agnostic) --------------------------
 
 # Search models. If the current engine defines engine_search() (only

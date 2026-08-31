@@ -27,6 +27,7 @@ ENGINE_API_KEY_VAR="VLLM_API_KEY"
 ENGINE_PORT_VAR="VLLM_PORT"
 ENGINE_GPU_MEM_VAR="VLLM_GPU_MEM"
 ENGINE_TOOL_CALL_PARSER_VAR="VLLM_TOOL_CALL_PARSER"
+ENGINE_REASONING_PARSER_VAR="VLLM_REASONING_PARSER"
 
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
@@ -49,6 +50,40 @@ ENGINE_RECOMMENDED_MODELS=(
 # family; see: https://docs.vllm.ai/en/latest/features/tool_calling.html
 ENGINE_DEFAULT_TOOL_CALL_PARSER="qwen3_xml"
 
+# Same rationale as above but for --reasoning-parser: all models
+# recommended above are Qwen3-family, which use <think></think> reasoning
+# delimiters — hence "qwen3" as the last-resort fallback (see
+# resolve_reasoning_parser below). Override VLLM_REASONING_PARSER (or set
+# it to empty to disable reasoning output) if serving a different model
+# family; see: https://docs.vllm.ai/en/latest/features/reasoning_outputs.html
+ENGINE_DEFAULT_REASONING_PARSER="qwen3"
+
+# Shared helper: fetches a model's config.json from HuggingFace and prints
+# its first "architectures" entry (empty on any failure — no network tools,
+# fetch failure, gated/private repo, or unparseable JSON). Used by both
+# resolve_tool_call_parser and resolve_reasoning_parser below so a
+# `dgxt start` only pays for one HF lookup instead of two.
+resolve_model_architecture() {
+  local model="$1"
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    return
+  fi
+
+  local config_json
+  config_json=$(curl -sfL "https://huggingface.co/${model}/raw/main/config.json" 2>/dev/null)
+  [[ -z "$config_json" ]] && return
+
+  echo "$config_json" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    archs = d.get('architectures') or []
+    print(archs[0] if archs else '')
+except Exception:
+    pass
+" 2>/dev/null
+}
+
 # Best-effort auto-detection of the right --tool-call-parser for a given
 # model. There's no official/automatic way to do this: HuggingFace has no
 # standard "tool call format" field, and vLLM itself has no auto-detect
@@ -64,28 +99,12 @@ ENGINE_DEFAULT_TOOL_CALL_PARSER="qwen3_xml"
 # than a clean, obvious failure.
 resolve_tool_call_parser() {
   local model="$1"
-  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    echo "$ENGINE_DEFAULT_TOOL_CALL_PARSER"
-    return
-  fi
-
-  local config_json
-  config_json=$(curl -sfL "https://huggingface.co/${model}/raw/main/config.json" 2>/dev/null)
-  if [[ -z "$config_json" ]]; then
-    echo "$ENGINE_DEFAULT_TOOL_CALL_PARSER"
-    return
-  fi
-
   local arch
-  arch=$(echo "$config_json" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    archs = d.get('architectures') or []
-    print(archs[0] if archs else '')
-except Exception:
-    pass
-" 2>/dev/null)
+  arch=$(resolve_model_architecture "$model")
+  if [[ -z "$arch" ]]; then
+    echo "$ENGINE_DEFAULT_TOOL_CALL_PARSER"
+    return
+  fi
 
   case "$arch" in
     *Qwen3Coder*|*Qwen3_5Moe*|*Qwen3Moe*|*Qwen3*) echo "qwen3_xml" ;;
@@ -102,13 +121,50 @@ except Exception:
   esac
 }
 
+# Same idea as resolve_tool_call_parser, but for --reasoning-parser: vLLM's
+# reasoning/chain-of-thought extraction is likewise model-family-specific
+# (Qwen3 uses <think>...</think>, DeepSeek-R1 uses its own delimiters,
+# Granite/Mistral/GLM4 etc. each have their own parser), so hardcoding
+# "qwen3" would silently break (or vllm serve would flat-out reject it)
+# for any non-Qwen3 model in ENGINE_RECOMMENDED_MODELS or a manually
+# configured VLLM_MODEL. Falls back to ENGINE_DEFAULT_REASONING_PARSER
+# only when detection can't run at all; returns empty (reasoning output
+# disabled, --enable-reasoning omitted) for a recognized-but-unmapped
+# architecture, same fail-clean rationale as the tool-call parser above.
+# See: https://docs.vllm.ai/en/latest/features/reasoning_outputs.html
+resolve_reasoning_parser() {
+  local model="$1"
+  local arch
+  arch=$(resolve_model_architecture "$model")
+  if [[ -z "$arch" ]]; then
+    echo "$ENGINE_DEFAULT_REASONING_PARSER"
+    return
+  fi
+
+  case "$arch" in
+    *Qwen3*) echo "qwen3" ;;
+    *DeepseekV3*|*DeepSeekV3*|*DeepseekV2*) echo "deepseek_v3" ;;
+    *Deepseek*|*DeepSeek*) echo "deepseek_r1" ;;
+    *Granite*) echo "granite" ;;
+    *Glm4*) echo "glm45" ;;
+    *Mistral*|*Mixtral*) echo "mistral" ;;
+    *GptOss*|*GPTOss*) echo "openai_gptoss" ;;
+    *) echo "" ;;
+  esac
+}
+
 # Start the vLLM container. Called by the generic cmd_start in dgxt
-# after it has resolved model/max_len/port/gpu_mem/api_key/tool_call_parser.
+# after it has resolved model/max_len/port/gpu_mem/api_key/tool_call_parser/
+# reasoning_parser.
 engine_run_container() {
-  local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5" tool_call_parser="${6:-}"
+  local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5" tool_call_parser="${6:-}" reasoning_parser="${7:-}"
   local tool_args=()
   if [[ -n "$tool_call_parser" ]]; then
     tool_args=(--enable-auto-tool-choice --tool-call-parser "$tool_call_parser")
+  fi
+  local reasoning_args=()
+  if [[ -n "$reasoning_parser" ]]; then
+    reasoning_args=(--enable-reasoning --reasoning-parser "$reasoning_parser")
   fi
   # Set (as a bare global, not passed positionally) by cmd_start's
   # native-max-context check when the user explicitly confirmed they
@@ -160,6 +216,5 @@ engine_run_container() {
     --api-key "$api_key" \
     "${tool_args[@]}" \
     "${rope_args[@]}" \
-    --enable-reasoning \
-    --reasoning-parser qwen3
+    "${reasoning_args[@]}"
 }
