@@ -36,20 +36,40 @@ ENGINE_MAX_LEN_VAR="NIM_MAX_MODEL_LEN"
 
 # NIM auto-selects a hardware "profile" per container that isn't
 # guaranteed to use the model's full native context — e.g. Qwen3-32B
-# (native 40960) can auto-select an 8192-token profile, which then
-# rejects any request wanting more, with an error that gives no hint
-# NIM_MAX_MODEL_LEN exists to fix it. Unlike lib/common.sh's HF-based
-# resolve_max_context (which vLLM uses), there's no reliable way to
-# derive the right number here since "model" is an NGC image tag, not an
-# HF repo id with a config.json to read — so this deliberately returns
-# empty (meaning: don't pass NIM_MAX_MODEL_LEN, let NIM's own profile
-# default apply) unless the user explicitly sets NIM_MAX_MODEL_LEN or
-# passes --max-context themselves. This shadows/overrides common.sh's
-# generic resolve_max_context, which would otherwise curl an invalid HF
-# repo id (the image tag) and silently fall back to a meaningless
-# hardcoded 131072.
+# (native 40960) can auto-select an 8192-token profile. Confirmed NIM's
+# vLLM backend enforces the EXACT same native-max validation vLLM itself
+# does (same error, same VLLM_ALLOW_LONG_MAX_MODEL_LEN escape hatch) --
+# so cmd_start's pre-flight native-max warning is just as valuable here,
+# it just needs the real underlying HF repo id, not the NGC image tag.
+# Verified via each image's NGC catalog page / actual container logs.
+# NOTE: must use `declare -g -A` (global), not plain `declare -A` --
+# this file is sourced from inside load_engine(), a bash function, so a
+# non-global declare here would scope the array to that function call
+# and it would vanish before resolve_max_context() is ever actually
+# invoked from cmd_start (a real bug hit and fixed during development:
+# an unset array indexed by a non-numeric key like a repo path makes
+# bash try to evaluate it as an arithmetic expression instead).
+declare -g -A NIM_KNOWN_HF_MODELS=(
+  ["nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest"]="meta-llama/Llama-3.1-8B-Instruct"
+  ["nvcr.io/nim/qwen/qwen3-32b-dgx-spark:latest"]="Qwen/Qwen3-32B"
+  ["nvcr.io/nim/nvidia/nvidia-nemotron-nano-9b-v2-dgx-spark:latest"]="nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+)
+
+# Overrides common.sh's generic resolve_max_context (which assumes
+# "model" already IS an HF repo id, true for vLLM but not NIM's NGC image
+# tags). For a known-mapped image (the table above), delegates to the
+# shared HF-based resolver on the real underlying repo id; for anything
+# else, returns empty (meaning: don't pass NIM_MAX_MODEL_LEN, let NIM's
+# own profile default apply) rather than guessing wrong or silently
+# falling back to a meaningless hardcoded 131072.
 resolve_max_context() {
-  echo ""
+  local model="$1"
+  local hf_model="${NIM_KNOWN_HF_MODELS[$model]:-}"
+  if [[ -n "$hf_model" ]]; then
+    resolve_max_context_from_hf_repo "$hf_model"
+  else
+    echo ""
+  fi
 }
 
 # NGC_API_KEY is a real credential from ngc.nvidia.com, not something dgxt

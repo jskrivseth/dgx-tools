@@ -212,11 +212,15 @@ parse_context_size() {
   esac
 }
 
-# Resolve a model's max context length from its actual config.json (the
+# Resolve an HF repo's max context length from its actual config.json (the
 # same file the serving engine itself reads); falls back to 131072 if it
 # can't be found. Reads the repo file directly (not via `hf`) since it
 # needs to work before a model is downloaded and without requiring `hf`.
-resolve_max_context() {
+# Named distinctly from resolve_max_context() (a thin wrapper around this
+# by default) so engines whose "model" isn't an HF repo id (e.g. nim.sh,
+# where it's an NGC image tag) can override the wrapper while still
+# reusing this for any known-mapped HF repo id underneath.
+resolve_max_context_from_hf_repo() {
   local model="$1"
   local max_ctx=""
   if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
@@ -253,6 +257,13 @@ except Exception:
     fi
   fi
   echo "${max_ctx:-131072}"
+}
+
+# Default resolve_max_context: for engines whose "model" value already IS
+# an HF repo id (vLLM), this is a direct passthrough. Engines where it
+# isn't (e.g. nim.sh) override this function entirely.
+resolve_max_context() {
+  resolve_max_context_from_hf_repo "$1"
 }
 
 # True if the current engine actually maps this setting to a real config
