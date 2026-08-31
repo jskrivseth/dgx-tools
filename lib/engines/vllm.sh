@@ -183,13 +183,22 @@ engine_run_container() {
   # position embeddings so the model can meaningfully attend beyond its
   # native range. Set as bare globals by cmd_start's native-max-context
   # check (auto-computed from the requested/native ratio), or settable
-  # directly for manual control. See:
-  # https://qwen.readthedocs.io/en/latest/deployment/vllm.html#context-length
+  # directly for manual control.
+  #
+  # NOTE: the standalone `--rope-scaling` CLI flag was removed in vLLM
+  # v0.11.1+ (the version `vllm/vllm-openai:latest` now tracks) -- passing
+  # it makes `vllm serve` reject the whole command with "unrecognized
+  # arguments", the same failure mode as the old --enable-reasoning flag.
+  # RoPE/YaRN scaling must now be injected via --hf-overrides, and current
+  # transformers configs key this as "rope_parameters" (older configs used
+  # "rope_scaling" -- vLLM's HF-overrides merge accepts either name, but
+  # "rope_parameters" is what newer model configs actually read). See:
+  # https://docs.vllm.ai/en/latest/features/context_extension/
   local rope_args=()
   local rope_factor="${VLLM_ROPE_SCALING_FACTOR:-${ROPE_SCALING_FACTOR:-}}"
   if [[ -n "$rope_factor" ]]; then
     local rope_original="${VLLM_ROPE_SCALING_ORIGINAL_MAX:-${ROPE_SCALING_ORIGINAL_MAX:-}}"
-    rope_args=(--rope-scaling "{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original}}")
+    rope_args=(--hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original}}}")
   fi
 
   # Only pass --max-model-len if dgxt actually resolved a value. If
