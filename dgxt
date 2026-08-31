@@ -186,11 +186,13 @@ cmd_start() {
   # Parse args: model name, then --max-context [N|Nk|Nm]
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
   local max_len=""
+  local max_len_explicit=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --max-context)
         if [[ -n "${2:-}" && "$2" != --* ]]; then
           max_len=$(parse_context_size "$2")
+          max_len_explicit=1
           shift 2
         else
           max_len="auto"
@@ -207,9 +209,39 @@ cmd_start() {
   local max_len_var_val
   max_len_var_val=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
   if [[ -z "$max_len" ]]; then
-    max_len="${max_len_var_val:-$(resolve_max_context "$model")}"
+    if [[ -n "$max_len_var_val" ]]; then
+      max_len="$max_len_var_val"
+      max_len_explicit=1
+    else
+      max_len=$(resolve_max_context "$model")
+    fi
   elif [[ "$max_len" == "auto" ]]; then
     max_len=$(resolve_max_context "$model")
+  fi
+
+  # If the context length was explicitly requested (CLI flag or a
+  # persisted config value) rather than auto-resolved, warn before
+  # wasting a full container-startup cycle if it exceeds the model's
+  # actual native max. vLLM (and likely other engines) hard-reject this
+  # deep in container logs after a slow model load anyway, with a real
+  # risk of "incorrect output or CUDA errors" if bypassed blindly --
+  # this is the same check vLLM's own validator enforces, just surfaced
+  # immediately instead of after a wasted startup attempt. NIM's
+  # resolve_max_context always returns empty (see nim.sh), so this
+  # naturally only fires for engines that can derive a real native value.
+  if [[ "$max_len_explicit" == "1" && "$max_len" =~ ^[0-9]+$ ]]; then
+    local native_max
+    native_max=$(resolve_max_context "$model")
+    if [[ "$native_max" =~ ^[0-9]+$ ]] && (( max_len > native_max )); then
+      echo "WARNING: requested context ($max_len) exceeds $model's native max ($native_max)."
+      echo "  Exceeding it risks incorrect output or CUDA errors."
+      read -rp "  Continue anyway? [y/N] " confirm_ctx
+      if [[ ! "$confirm_ctx" =~ ^[Yy] ]]; then
+        echo "Aborted. Try: dgxt start --max-context $native_max"
+        return 1
+      fi
+      ALLOW_LONG_MAX_MODEL_LEN=1
+    fi
   fi
 
   local port="${!ENGINE_PORT_VAR:-8000}"

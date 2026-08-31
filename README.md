@@ -114,7 +114,11 @@ This walks through, in order:
 
 `--max-context` (and the underlying `VLLM_MAX_MODEL_LEN`/`NIM_MAX_MODEL_LEN`
 config vars) accept plain token counts or binary K/M shorthand: `64k` ==
-`65536`, `256k` == `262144`, `1m` == `1048576`.
+`65536`, `256k` == `262144`, `1m` == `1048576`. If you explicitly request
+more than a model's real native context (vLLM only — checked against the
+model's own config.json), dgxt warns and asks before starting, since
+exceeding it risks incorrect output or CUDA errors; confirming sets
+`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` for you.
 
 Once running, the server speaks the OpenAI-compatible API:
 

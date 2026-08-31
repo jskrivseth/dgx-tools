@@ -105,6 +105,11 @@ engine_run_container() {
   if [[ -n "$tool_call_parser" ]]; then
     tool_args=(--enable-auto-tool-choice --tool-call-parser "$tool_call_parser")
   fi
+  # Set (as a bare global, not passed positionally) by cmd_start's
+  # native-max-context check when the user explicitly confirmed they
+  # want to exceed the model's derived native context length.
+  local allow_long_env=()
+  [[ "${ALLOW_LONG_MAX_MODEL_LEN:-0}" == "1" ]] && allow_long_env=(-e "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -115,6 +120,7 @@ engine_run_container() {
     -p "${port}:8000" \
     -e HF_TOKEN="${HF_TOKEN:-}" \
     -e VLLM_API_KEY="$api_key" \
+    "${allow_long_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
