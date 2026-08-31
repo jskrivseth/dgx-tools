@@ -101,6 +101,32 @@ load_engine() {
 CURRENT_ENGINE="${DGXT_ENGINE:-vllm}"
 load_engine "$CURRENT_ENGINE"
 
+# Warn about (and offer to stop) any OTHER engine's container that's still
+# running. dgxt treats "current engine" as the one active server, but
+# nothing stops a container from a PREVIOUSLY active engine from still
+# running under its own name — which then fights the new one for the same
+# port (and GPU memory). Left unhandled, that surfaces as a cryptic
+# "port is already allocated" docker error instead of a clear cause.
+check_other_engines_running() {
+  local name other_container
+  for name in $(list_engine_files); do
+    [[ "$name" == "$CURRENT_ENGINE" ]] && continue
+    other_container=$(source "$DGXT_ROOT/lib/engines/${name}.sh" 2>/dev/null; echo "${ENGINE_CONTAINER_NAME:-}")
+    [[ -z "$other_container" ]] && continue
+    if is_running "$other_container"; then
+      echo "WARNING: the '$name' engine's container ('$other_container') is still running."
+      echo "  Running two engines at once will likely conflict on port 8000 and/or GPU memory."
+      read -rp "  Stop it now? [Y/n] " stop_other
+      if [[ ! "$stop_other" =~ ^[Nn] ]]; then
+        cmd_stop "$other_container"
+      else
+        echo "  Leaving it running — you may hit a port conflict below."
+      fi
+      echo ""
+    fi
+  done
+}
+
 cmd_engine() {
   local target="${1:-}"
   if [[ -z "$target" ]]; then
@@ -147,6 +173,15 @@ cmd_start() {
     echo "Container '$ENGINE_CONTAINER_NAME' is already running."
     return
   fi
+
+  check_other_engines_running
+
+  # A previous failed `docker run` (e.g. a port conflict) can leave behind
+  # a stopped/never-started container with this name, which then makes
+  # THIS run fail with "Conflict: name already in use" instead of actually
+  # retrying. Safe to remove unconditionally here: the is_running check
+  # above already confirmed it's not currently serving anything.
+  docker rm -f "$ENGINE_CONTAINER_NAME" >/dev/null 2>&1 || true
 
   # Parse args: model name, then --max-context [N]
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
