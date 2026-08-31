@@ -128,15 +128,25 @@ remember `hf` flags just to get a model running); everything else is a
 direct passthrough:
 
 ```bash
-./dgxt search <query>       # -> hf models ls --search <query> --sort downloads
+./dgxt search <query>       # vllm/HF-based engines -> hf models ls --search <query> --sort downloads
 ./dgxt model-pull <model>   # -> hf download <model>  (pre-fetch before starting)
 ./dgxt model-list           # -> hf cache ls
 ```
 
-These are HF-based and don't apply to NIM — its models are prebuilt NGC
-container images, not HF repos to pre-download; pick one from
-`ENGINE_RECOMMENDED_MODELS` (`lib/engines/nim.sh`) or browse
-https://build.nvidia.com/spark instead.
+`model-pull`/`model-list` are HF-only and don't apply to NIM — its models
+are prebuilt NGC container images, not HF repos to pre-download; pick one
+from `ENGINE_RECOMMENDED_MODELS` (`lib/engines/nim.sh`) instead. `search`
+*does* work for NIM, though — it queries NGC's public catalog search API
+directly (no NGC CLI/API key needed just to browse) and flags which
+results are confirmed ARM64/DGX-Spark-native vs. likely x86_64-only:
+
+```bash
+./dgxt search qwen   # (with DGXT_ENGINE=nim)
+#   nvcr.io/nim/qwen/qwen3-32b-dgx-spark:latest  [DGX-Spark/ARM64-native]
+#       Qwen3-32B NIM for DGX Spark
+#   nvcr.io/nim/qwen/qwen-2.5-72b-instruct:latest
+#       qwen-2.5-72b-instruct                     <- likely x86_64-only
+```
 
 For anything beyond that — browsing by author/params, verifying cache
 integrity, pruning incomplete downloads, switching HF accounts — just use

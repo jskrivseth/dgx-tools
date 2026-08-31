@@ -12,10 +12,10 @@
 #     engine_defines_var()/ENGINE_API_KEY_EXTERNAL usage in dgxt for how
 #     these differences are handled generically.
 #   - Only a small, NVIDIA-curated catalog of models exist as NIMs — there's
-#     no free-form "serve any HF model" option like vLLM. Stick to
-#     ENGINE_RECOMMENDED_MODELS (or browse https://build.nvidia.com/spark
-#     for more) rather than `dgxt search`/`model-pull`, which are HF-only
-#     and don't apply here.
+#     no free-form "serve any HF model" option like vLLM. `dgxt search`
+#     queries NGC's public catalog search API directly (see engine_search
+#     below); `dgxt model-pull`/`model-list` are still HF-only and don't
+#     apply here (NIM containers download their own weights on first run).
 #
 # Reference: https://build.nvidia.com/spark/nim-llm/overview
 
@@ -93,4 +93,58 @@ engine_run_container() {
     -v "${NIM_WORKSPACE_DIR}:/opt/nim/workspace" \
     -p "${port}:8000" \
     "$model"
+}
+
+# Search NVIDIA's public NGC catalog for NIM containers. Uses the same
+# unauthenticated search API catalog.ngc.nvidia.com's own web UI calls
+# (no NGC CLI or API key needed just to browse). Called generically by
+# dgxt's cmd_search, which delegates here when this function is defined.
+#
+# Important caveat: this searches ALL NIM containers, most of which are
+# x86_64-only — only results with "-dgx-spark" in the name are confirmed
+# ARM64/GB10-native (see the module comment above re: narrow ARM64
+# coverage). Flagged in the output rather than filtered out entirely,
+# since NVIDIA adds new DGX Spark-native images over time and a name-based
+# heuristic could miss ones that don't follow the naming convention yet.
+engine_search() {
+  local query="$1"
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: search requires curl and python3." >&2
+    return 1
+  fi
+
+  local qparam
+  qparam=$(python3 -c "
+import urllib.parse, json, sys
+print(urllib.parse.quote(json.dumps({'query': sys.argv[1], 'page': 0, 'pageSize': 50})))
+" "$query")
+
+  local resp
+  resp=$(curl -sf --max-time 10 "https://api.ngc.nvidia.com/v2/search/catalog/resources/CONTAINER?q=${qparam}" 2>/dev/null)
+  if [[ -z "$resp" ]]; then
+    echo "ERROR: NGC catalog search request failed (network issue?)." >&2
+    return 1
+  fi
+
+  echo "$resp" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+seen = {}
+for r in d.get('results', []):
+    for item in r.get('resources', []):
+        if item.get('orgName') == 'nim':
+            seen[item['resourceId']] = item.get('displayName', '')
+if not seen:
+    print('No NIM containers found for that query.')
+else:
+    for rid in sorted(seen):
+        tag = 'nvcr.io/' + rid + ':latest'
+        native = '  [DGX-Spark/ARM64-native]' if 'dgx-spark' in rid else ''
+        print(f'  {tag}{native}')
+        print(f'      {seen[rid]}')
+"
+  echo ""
+  echo "NOTE: only '[DGX-Spark/ARM64-native]' results are confirmed to run on this"
+  echo "hardware. Most NIM images are x86_64-only. Full curated ARM64 list:"
+  echo "  https://build.nvidia.com/spark"
 }

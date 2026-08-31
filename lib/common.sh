@@ -262,18 +262,23 @@ resolve_tool_call_parser_for_engine() {
   fi
 }
 
-# ---- HF passthroughs (engine-agnostic) ------------------------------------
+# ---- Model search/passthroughs (engine-agnostic) --------------------------
 
-# Search HuggingFace models — passthrough to `hf models ls`. If the current
-# engine defines ENGINE_HF_APPS_FILTER, results are filtered to models
-# compatible with it.
+# Search models. If the current engine defines engine_search() (only
+# nim.sh does today — model catalogs vary wildly by engine), delegates to
+# that; otherwise falls back to the generic `hf models ls` passthrough
+# (optionally filtered to ENGINE_HF_APPS_FILTER-compatible models).
 cmd_search() {
-  ensure_hf_cli || return 1
   local query="${1:-}"
   shift || true
   if [[ -z "$query" ]]; then
     read -rp "Search query: " query
   fi
+  if declare -f engine_search >/dev/null 2>&1; then
+    engine_search "$query"
+    return
+  fi
+  ensure_hf_cli || return 1
   if [[ -n "${ENGINE_HF_APPS_FILTER:-}" ]]; then
     hf models ls --search "$query" --apps "$ENGINE_HF_APPS_FILTER" --sort downloads "$@"
   else
