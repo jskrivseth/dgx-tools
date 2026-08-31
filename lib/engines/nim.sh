@@ -14,8 +14,9 @@
 #   - Only a small, NVIDIA-curated catalog of models exist as NIMs — there's
 #     no free-form "serve any HF model" option like vLLM. `dgxt search`
 #     queries NGC's public catalog search API directly (see engine_search
-#     below); `dgxt model-pull`/`model-list` are still HF-only and don't
-#     apply here (NIM containers download their own weights on first run).
+#     below); `dgxt model-pull`/`model-list` pre-pull/list Docker images
+#     directly (see engine_model_pull/engine_model_list below) since NIM
+#     models aren't HF repos `hf download`/`hf cache ls` could handle.
 #
 # Reference: https://build.nvidia.com/spark/nim-llm/overview
 
@@ -147,4 +148,43 @@ else:
   echo "NOTE: only '[DGX-Spark/ARM64-native]' results are confirmed to run on this"
   echo "hardware. Most NIM images are x86_64-only. Full curated ARM64 list:"
   echo "  https://build.nvidia.com/spark"
+}
+
+# Pre-pull the NIM Docker image ahead of `dgxt start`. Note this only
+# pre-fetches the image itself, not the model weights inside it — those
+# are downloaded by the container from NGC into NIM_CACHE_DIR on first
+# run, and NIM exposes no separate "pre-fetch just the weights" step.
+# Called generically by dgxt's cmd_model_pull.
+engine_model_pull() {
+  local model="$1"
+  ensure_docker
+  local ngc_api_key="${!ENGINE_API_KEY_VAR:-}"
+  if [[ -z "$ngc_api_key" ]]; then
+    echo "ERROR: $ENGINE_API_KEY_VAR is not set." >&2
+    echo "  $ENGINE_API_KEY_HINT" >&2
+    return 1
+  fi
+
+  mkdir -p "$NIM_DOCKER_CONFIG_DIR"
+  echo "Logging in to nvcr.io..."
+  if ! echo "$ngc_api_key" | docker --config "$NIM_DOCKER_CONFIG_DIR" login nvcr.io --username '$oauthtoken' --password-stdin; then
+    echo "ERROR: docker login nvcr.io failed (see docker's error above)." >&2
+    echo "  $ENGINE_API_KEY_HINT" >&2
+    return 1
+  fi
+
+  echo "Pulling $model..."
+  docker --config "$NIM_DOCKER_CONFIG_DIR" pull "$model"
+}
+
+# List locally pulled NIM images — docker's own image cache, not a
+# separate model-weights cache (those live under NIM_CACHE_DIR, downloaded
+# per-container on first run; see engine_model_pull above).
+engine_model_list() {
+  ensure_docker
+  echo "Locally pulled NIM images:"
+  docker images --filter "reference=nvcr.io/nim/*" --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
+  echo ""
+  echo "Downloaded model weights (fetched by the container from NGC on first run):"
+  echo "  $NIM_CACHE_DIR"
 }

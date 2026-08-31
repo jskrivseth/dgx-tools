@@ -286,18 +286,29 @@ cmd_search() {
   fi
 }
 
-# Download a model to the local HF cache — passthrough to `hf download`.
-# `hf` handles resuming/validating partial downloads itself; we only
-# guarantee the cache dir is writable first.
+# Download a model. If the current engine defines engine_model_pull()
+# (only nim.sh does today — "pulling a model" means something different
+# per engine), delegates to that; otherwise falls back to `hf download`
+# (uses the dgxt cache dir). `hf` handles resuming/validating partial
+# downloads itself; we only guarantee the cache dir is writable first.
 cmd_model_pull() {
-  ensure_hf_cli || return 1
   local model="${1:-${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}}"
+  if declare -f engine_model_pull >/dev/null 2>&1; then
+    engine_model_pull "$model"
+    return
+  fi
+  ensure_hf_cli || return 1
   ensure_hub_cache || return 1
   hf download "$model"
 }
 
-# List downloaded models — passthrough to `hf cache ls`.
+# List downloaded models. Delegates to engine_model_list() if the current
+# engine defines one (only nim.sh today); otherwise `hf cache ls`.
 cmd_model_list() {
+  if declare -f engine_model_list >/dev/null 2>&1; then
+    engine_model_list
+    return
+  fi
   ensure_hf_cli || return 1
   hf cache ls
 }

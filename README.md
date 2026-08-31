@@ -133,12 +133,14 @@ direct passthrough:
 ./dgxt model-list           # -> hf cache ls
 ```
 
-`model-pull`/`model-list` are HF-only and don't apply to NIM — its models
-are prebuilt NGC container images, not HF repos to pre-download; pick one
-from `ENGINE_RECOMMENDED_MODELS` (`lib/engines/nim.sh`) instead. `search`
-*does* work for NIM, though — it queries NGC's public catalog search API
-directly (no NGC CLI/API key needed just to browse) and flags which
-results are confirmed ARM64/DGX-Spark-native vs. likely x86_64-only:
+All three work for NIM too, just against NGC instead of HF: `search`
+queries NGC's public catalog search API directly (no NGC CLI/API key
+needed just to browse) and flags which results are confirmed
+ARM64/DGX-Spark-native vs. likely x86_64-only; `model-pull` pre-pulls the
+Docker image (not the model weights inside it — those download from NGC
+into `~/.cache/nim` on first container start, NIM exposes no separate
+step for that); `model-list` shows locally pulled NIM images instead of
+the HF cache.
 
 ```bash
 ./dgxt search qwen   # (with DGXT_ENGINE=nim)
