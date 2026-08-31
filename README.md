@@ -5,8 +5,8 @@ similar single-GPU ARM64 NVIDIA workstation) as fast as possible — no
 native builds, no dependency wrangling beyond Docker and the official
 HuggingFace CLI.
 
-Currently implemented: **vLLM**. Placeholders exist for TensorRT-LLM,
-SGLang, llama.cpp, NIM, and Ollama (see [Engines](#engines) below).
+Currently implemented: **vLLM** and **NIM**. Placeholders exist for
+TensorRT-LLM, SGLang, llama.cpp, and Ollama (see [Engines](#engines) below).
 
 dgxt does **not** reimplement anything the `hf` CLI already does well —
 searching, downloading, cache management, and auth are all thin
@@ -92,11 +92,11 @@ ln -s ~/dgx-tools/dgxt ~/bin/dgxt   # if ~/bin is already on your PATH
 ```
 
 This walks through, in order:
-1. **Engine selection** — defaults to `vllm` (the only implemented one today)
+1. **Engine selection** — defaults to `vllm`; switch to `nim` for NVIDIA's curated, self-tuned containers (`./dgxt engine nim`)
 2. **Docker check** — tells you the exact fix command if it's not accessible
-3. **HuggingFace auth** — checks `hf auth whoami`, offers to run `hf auth login` if not logged in, and mirrors the token into your config for the container to use
-4. **API key** — generates and saves a random key if you don't have one (never serves on the LAN with a fixed/guessable key)
-5. **Model pick** — shows a short list of recommended models for this hardware, or type your own HuggingFace model ID
+3. **HuggingFace auth** — checks `hf auth whoami`, offers to run `hf auth login` if not logged in, and mirrors the token into your config for the container to use (skipped for engines like NIM that don't use HF)
+4. **API key** — generates and saves a random key if you don't have one (never serves on the LAN with a fixed/guessable key); for NIM, prompts you to paste a real NGC API key instead, since that one can't be invented
+5. **Model pick** — shows a short list of recommended models for this hardware, or type your own (a HuggingFace model ID for vLLM, an NGC image tag for NIM)
 
 ...then starts the container and streams logs until the server is healthy.
 
@@ -133,6 +133,11 @@ direct passthrough:
 ./dgxt model-list           # -> hf cache ls
 ```
 
+These are HF-based and don't apply to NIM — its models are prebuilt NGC
+container images, not HF repos to pre-download; pick one from
+`ENGINE_RECOMMENDED_MODELS` (`lib/engines/nim.sh`) or browse
+https://build.nvidia.com/spark instead.
+
 For anything beyond that — browsing by author/params, verifying cache
 integrity, pruning incomplete downloads, switching HF accounts — just use
 `hf` directly:
@@ -161,6 +166,17 @@ VLLM_GPU_MEM=0.8
 HF_TOKEN=hf_...
 ```
 
+NIM uses a different set of keys (no context-length/GPU-memory knobs — each
+container auto-tunes itself):
+
+```bash
+# ~/.dgxtrc with DGXT_ENGINE=nim
+DGXT_ENGINE=nim
+NIM_IMAGE=nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest
+NGC_API_KEY=<your real key from ngc.nvidia.com/setup/api-key>
+NIM_PORT=8000
+```
+
 ## Engines
 
 ```bash
@@ -171,19 +187,23 @@ HF_TOKEN=hf_...
 | Engine | Status |
 |---|---|
 | `vllm` | ready |
+| `nim` | ready |
 | `tensorrt-llm` | planned |
 | `sglang` | planned |
 | `llama-cpp` | planned |
-| `nim` | planned |
 | `ollama` | planned |
 
-Adding a new engine means writing one small file in `lib/engines/`
-(see `lib/engines/vllm.sh` as the reference) — a handful of variables
-(container name, image, config-file variable names, recommended models)
-plus one function that runs `docker run`. Everything else — Docker
-lifecycle, health-check waiting, log streaming, HF passthroughs, config
-save/load, random API key generation — is shared in `lib/common.sh` and
-just works once the engine module is filled in.
+Adding a new engine means writing one small file in `lib/engines/` — a
+handful of variables (container name, config-file variable names,
+recommended models) plus one function that runs `docker run`. Everything
+else — Docker lifecycle, health-check waiting, log streaming, HF
+passthroughs, config save/load, random API key generation — is shared in
+`lib/common.sh` and just works once the engine module is filled in.
+`lib/engines/vllm.sh` is the reference for a "one image + `--model` flag,
+HF-hosted, auto-generated API key" engine; `lib/engines/nim.sh` is the
+reference for the opposite shape — one image per model, an external
+registry API key that must never be auto-generated, and no
+context-length/GPU-memory knobs at all.
 
 ## Troubleshooting
 

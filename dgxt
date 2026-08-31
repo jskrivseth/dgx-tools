@@ -8,9 +8,9 @@
 # to install it via pip if it's missing, but never does so silently). See:
 #   https://huggingface.co/docs/huggingface_hub/en/guides/cli
 #
-# Engines are pluggable (lib/engines/*.sh). Currently implemented: vLLM.
-# Placeholders exist for TensorRT-LLM, SGLang, llama.cpp, NIM, and Ollama —
-# select one with `dgxt engine <name>` once it's implemented.
+# Engines are pluggable (lib/engines/*.sh). Currently implemented: vLLM,
+# NIM. Placeholders exist for TensorRT-LLM, SGLang, and Ollama — select
+# one with `dgxt engine <name>` once it's implemented.
 #
 # Quick start:
 #   dgxt setup                              Guided: pick engine, prereqs, hf auth, pick a model, start
@@ -26,8 +26,8 @@
 #   save                                Save current effective settings to ~/.dgxtrc
 #                                       (also creates the file if it doesn't exist yet)
 #   engine [name]                      Show/list engines, or switch the active one
-#   search [query]                     Passthrough to `hf models ls --search ...`
-#   model-pull [model]                 Passthrough to `hf download` (uses the dgxt cache dir)
+#   search [query]                     Passthrough to `hf models ls --search ...` (HF-based engines only)
+#   model-pull [model]                 Passthrough to `hf download` (HF-based engines only)
 #   model-list                         Passthrough to `hf cache ls`
 #   setup                              Guided setup (engine pick, prereqs, hf auth, model pick, start)
 #   help                               Show this help
@@ -40,6 +40,7 @@
 #   VLLM_PORT=8000
 #   VLLM_GPU_MEM=0.8
 #   HF_TOKEN=hf_...
+#   # NIM engine instead uses: NIM_IMAGE, NGC_API_KEY, NIM_PORT (see lib/engines/nim.sh)
 #
 # Env vars always override the config file (export VLLM_MODEL=... etc).
 #
@@ -88,6 +89,11 @@ load_engine() {
   ENGINE_GPU_MEM_VAR="_DGXT_UNSET" ENGINE_TOOL_CALL_PARSER_VAR="_DGXT_UNSET"
   ENGINE_DEFAULT_MODEL=""
   ENGINE_DEFAULT_TOOL_CALL_PARSER=""
+  # ENGINE_API_KEY_EXTERNAL=1 means this engine's API key must come from an
+  # external service (e.g. NIM's NGC_API_KEY) and should never be
+  # auto-generated; ENGINE_API_KEY_HINT is the guidance shown when it's unset.
+  ENGINE_API_KEY_EXTERNAL="0"
+  ENGINE_API_KEY_HINT=""
   # shellcheck source=/dev/null
   source "$file"
 }
@@ -173,20 +179,32 @@ cmd_start() {
   local port="${!ENGINE_PORT_VAR:-8000}"
   local gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
   local tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "$model")}"
-  local api_key
-  api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
-  local api_key_was_unset=0
-  [[ -z "${!ENGINE_API_KEY_VAR:-}" ]] && api_key_was_unset=1
+  local api_key api_key_was_unset=0
+  if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
+    # This engine's "API key" comes from an external service (not
+    # something dgxt can safely auto-generate, e.g. NIM's NGC_API_KEY) —
+    # generating a random fallback here would silently persist a bogus
+    # credential and fail confusingly later. Require it explicitly.
+    api_key="${!ENGINE_API_KEY_VAR:-}"
+    if [[ -z "$api_key" ]]; then
+      echo "ERROR: $ENGINE_API_KEY_VAR is not set." >&2
+      echo "  ${ENGINE_API_KEY_HINT:-Set it in $DEFAULT_CONFIG_FILE or export it, then retry.}" >&2
+      return 1
+    fi
+  else
+    api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
+    [[ -z "${!ENGINE_API_KEY_VAR:-}" ]] && api_key_was_unset=1
+  fi
 
   echo ""
   echo "Starting $ENGINE_NAME server:"
   echo "  Config file:    $DEFAULT_CONFIG_FILE $([ -f "$DEFAULT_CONFIG_FILE" ] && echo '(loaded)' || echo '(not found)')"
   echo "  Model:          $model"
-  echo "  Context:        $max_len tokens"
-  echo "  GPU memory:     ${gpu_mem} (fraction)"
+  engine_defines_var "$ENGINE_MAX_LEN_VAR" && echo "  Context:        $max_len tokens"
+  engine_defines_var "$ENGINE_GPU_MEM_VAR" && echo "  GPU memory:     ${gpu_mem} (fraction)"
   echo "  Port:           $port"
   echo "  API key:        ${api_key:0:8}..."
-  echo "  Tool calling:   ${tool_call_parser:-disabled}"
+  engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && echo "  Tool calling:   ${tool_call_parser:-disabled}"
   echo "  Image:          ${ENGINE_IMAGE:-n/a}"
   echo ""
   if [[ "$api_key_was_unset" -eq 1 ]]; then
@@ -198,7 +216,7 @@ cmd_start() {
     echo ""
   fi
 
-  if [[ -z "${HF_TOKEN:-}" ]]; then
+  if [[ -n "${ENGINE_HF_APPS_FILTER:-}" && -z "${HF_TOKEN:-}" ]]; then
     echo "WARNING: HF_TOKEN not set. Gated models may fail to download."
     echo "  Log in with: hf auth login   (or set HF_TOKEN / add it to $DEFAULT_CONFIG_FILE)"
     read -rp "  Continue anyway? [y/N] " confirm
@@ -238,12 +256,22 @@ cmd_config() {
     echo "  ('$CURRENT_ENGINE' is a placeholder — no engine-specific settings yet)"
   else
     printf "  %-20s %s\n" "$ENGINE_MODEL_VAR:" "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
-    printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
-    printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; a random key is generated at start>}"
+    if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
+      printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+    fi
+    if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
+      printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; ${ENGINE_API_KEY_HINT:-required, see engine docs}>}"
+    else
+      printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; a random key is generated at start>}"
+    fi
     printf "  %-20s %s\n" "$ENGINE_PORT_VAR:" "${!ENGINE_PORT_VAR:-8000}"
-    printf "  %-20s %s\n" "$ENGINE_GPU_MEM_VAR:" "${!ENGINE_GPU_MEM_VAR:-0.8}"
-    local cfg_tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
-    printf "  %-20s %s\n" "$ENGINE_TOOL_CALL_PARSER_VAR:" "${cfg_tool_call_parser:-disabled}"
+    if engine_defines_var "$ENGINE_GPU_MEM_VAR"; then
+      printf "  %-20s %s\n" "$ENGINE_GPU_MEM_VAR:" "${!ENGINE_GPU_MEM_VAR:-0.8}"
+    fi
+    if engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR"; then
+      local cfg_tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
+      printf "  %-20s %s\n" "$ENGINE_TOOL_CALL_PARSER_VAR:" "${cfg_tool_call_parser:-disabled}"
+    fi
   fi
   printf "  %-20s %s\n" "HF_TOKEN:" "${HF_TOKEN:-(not set)}"
   printf "  %-20s %s\n" "HUB_CACHE:" "$HUB_CACHE"
@@ -269,12 +297,19 @@ cmd_save() {
   fi
 
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
-  local max_len="${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "$model")}"
-  local api_key
-  api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
+  local max_len=""
+  engine_defines_var "$ENGINE_MAX_LEN_VAR" && max_len="${!ENGINE_MAX_LEN_VAR:-$(resolve_max_context "$model")}"
+  local api_key=""
+  if [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
+    api_key="${!ENGINE_API_KEY_VAR:-}"
+  else
+    api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
+  fi
   local port="${!ENGINE_PORT_VAR:-8000}"
-  local gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
-  local tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "$model")}"
+  local gpu_mem=""
+  engine_defines_var "$ENGINE_GPU_MEM_VAR" && gpu_mem="${!ENGINE_GPU_MEM_VAR:-0.8}"
+  local tool_call_parser=""
+  engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && tool_call_parser="${!ENGINE_TOOL_CALL_PARSER_VAR:-$(resolve_tool_call_parser_for_engine "$model")}"
   local hf_token="${HF_TOKEN:-}"
 
   {
@@ -285,26 +320,37 @@ cmd_save() {
     echo "# Active engine (vllm, tensorrt-llm, sglang, llama-cpp, nim, ollama)"
     echo "DGXT_ENGINE=$CURRENT_ENGINE"
     echo ""
-    echo "# Model to serve (HuggingFace handle)"
+    echo "# Model to serve"
     echo "$ENGINE_MODEL_VAR=$model"
     echo ""
-    echo "# Max context length in tokens (auto-resolved per model if unset)"
-    echo "$ENGINE_MAX_LEN_VAR=$max_len"
-    echo ""
-    echo "# API key for the server endpoint"
-    echo "$ENGINE_API_KEY_VAR=$api_key"
+    if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
+      echo "# Max context length in tokens (auto-resolved per model if unset)"
+      echo "$ENGINE_MAX_LEN_VAR=$max_len"
+      echo ""
+    fi
+    if [[ -n "$api_key" ]]; then
+      echo "# API key for the server endpoint"
+      echo "$ENGINE_API_KEY_VAR=$api_key"
+    else
+      echo "# ${ENGINE_API_KEY_HINT:-API key for the server endpoint}"
+      echo "# $ENGINE_API_KEY_VAR=..."
+    fi
     echo ""
     echo "# Port to expose (container always uses 8000 internally)"
     echo "$ENGINE_PORT_VAR=$port"
     echo ""
-    echo "# GPU memory fraction (0.0-1.0)"
-    echo "$ENGINE_GPU_MEM_VAR=$gpu_mem"
-    echo ""
-    echo "# Tool-call parser for agentic/function-calling clients (empty disables"
-    echo "# tool calling support entirely). Must match the model's tool-call output"
-    echo "# format: https://docs.vllm.ai/en/latest/features/tool_calling.html"
-    echo "$ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
-    echo ""
+    if engine_defines_var "$ENGINE_GPU_MEM_VAR"; then
+      echo "# GPU memory fraction (0.0-1.0)"
+      echo "$ENGINE_GPU_MEM_VAR=$gpu_mem"
+      echo ""
+    fi
+    if engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR"; then
+      echo "# Tool-call parser for agentic/function-calling clients (empty disables"
+      echo "# tool calling support entirely). Must match the model's tool-call output"
+      echo "# format: https://docs.vllm.ai/en/latest/features/tool_calling.html"
+      echo "$ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
+      echo ""
+    fi
     echo "# HuggingFace token for gated models (or just run: hf auth login)"
     if [[ -n "$hf_token" ]]; then
       echo "HF_TOKEN=$hf_token"
@@ -319,11 +365,11 @@ cmd_save() {
   echo "Saved to $DEFAULT_CONFIG_FILE:"
   echo "  DGXT_ENGINE=$CURRENT_ENGINE"
   echo "  $ENGINE_MODEL_VAR=$model"
-  echo "  $ENGINE_MAX_LEN_VAR=$max_len"
-  echo "  $ENGINE_API_KEY_VAR=$api_key"
+  engine_defines_var "$ENGINE_MAX_LEN_VAR" && echo "  $ENGINE_MAX_LEN_VAR=$max_len"
+  [[ -n "$api_key" ]] && echo "  $ENGINE_API_KEY_VAR=$api_key"
   echo "  $ENGINE_PORT_VAR=$port"
-  echo "  $ENGINE_GPU_MEM_VAR=$gpu_mem"
-  echo "  $ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
+  engine_defines_var "$ENGINE_GPU_MEM_VAR" && echo "  $ENGINE_GPU_MEM_VAR=$gpu_mem"
+  engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && echo "  $ENGINE_TOOL_CALL_PARSER_VAR=$tool_call_parser"
   [[ -n "$hf_token" ]] && echo "  HF_TOKEN=$hf_token"
 }
 
@@ -386,38 +432,52 @@ cmd_setup() {
   echo ""
 
   echo "[3/5] HuggingFace CLI & authentication..."
-  if ! ensure_hf_cli; then
-    exit 1
-  fi
-  if hf auth whoami >/dev/null 2>&1; then
-    echo "  Already authenticated with hf."
+  if [[ -z "${ENGINE_HF_APPS_FILTER:-}" ]]; then
+    echo "  Not used by '$CURRENT_ENGINE' — skipping."
   else
-    echo "  Not logged in. A token is required for gated models (Llama, etc.)."
-    echo "  Get one at: https://huggingface.co/settings/tokens"
-    echo ""
-    read -rp "  Log in now with 'hf auth login'? [Y/n] " do_login
-    if [[ ! "$do_login" =~ ^[Nn] ]]; then
-      hf auth login || true
-    else
-      echo "  Skipping — you can run 'hf auth login' any time."
+    if ! ensure_hf_cli; then
+      exit 1
     fi
-  fi
-  # Mirror hf's stored token into HF_TOKEN for the container: the container
-  # has its own environment, not hf's local credential store.
-  local hf_token
-  hf_token=$(hf auth token 2>/dev/null || true)
-  if [[ -n "$hf_token" ]]; then
-    save_config_value HF_TOKEN "$hf_token"
-    echo "  HF_TOKEN saved to $DEFAULT_CONFIG_FILE for the container to use."
+    if hf auth whoami >/dev/null 2>&1; then
+      echo "  Already authenticated with hf."
+    else
+      echo "  Not logged in. A token is required for gated models (Llama, etc.)."
+      echo "  Get one at: https://huggingface.co/settings/tokens"
+      echo ""
+      read -rp "  Log in now with 'hf auth login'? [Y/n] " do_login
+      if [[ ! "$do_login" =~ ^[Nn] ]]; then
+        hf auth login || true
+      else
+        echo "  Skipping — you can run 'hf auth login' any time."
+      fi
+    fi
+    # Mirror hf's stored token into HF_TOKEN for the container: the
+    # container has its own environment, not hf's local credential store.
+    local hf_token
+    hf_token=$(hf auth token 2>/dev/null || true)
+    if [[ -n "$hf_token" ]]; then
+      save_config_value HF_TOKEN "$hf_token"
+      echo "  HF_TOKEN saved to $DEFAULT_CONFIG_FILE for the container to use."
+    fi
   fi
   echo ""
 
-  echo "[4/5] API key for the server endpoint..."
+  echo "[4/5] API key..."
   # ENGINE_API_KEY_VAR is already in the environment here if it was in the
   # config file — load_config() exported it at script startup.
   local api_key="${!ENGINE_API_KEY_VAR:-}"
   if [[ -n "$api_key" ]]; then
     echo "  $ENGINE_API_KEY_VAR is set: ${api_key:0:8}..."
+  elif [[ "${ENGINE_API_KEY_EXTERNAL:-0}" == "1" ]]; then
+    echo "  $ENGINE_API_KEY_VAR is not set."
+    echo "  ${ENGINE_API_KEY_HINT:-This engine requires a key from an external service.}"
+    read -rp "  Paste $ENGINE_API_KEY_VAR now (or leave blank to skip): " api_key
+    if [[ -n "$api_key" ]]; then
+      save_config_value "$ENGINE_API_KEY_VAR" "$api_key"
+      echo "  Saved."
+    else
+      echo "  Skipping — 'dgxt start' will fail until $ENGINE_API_KEY_VAR is set."
+    fi
   else
     api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
     save_config_value "$ENGINE_API_KEY_VAR" "$api_key"
@@ -436,8 +496,10 @@ cmd_setup() {
     printf "    %-38s %-8s %s\n" "$mid" "$size" "$note"
   done
   echo ""
-  echo "  Browse more: hf models ls --search <query> --apps $ENGINE_NAME --sort downloads"
-  echo ""
+  if [[ -n "${ENGINE_HF_APPS_FILTER:-}" ]]; then
+    echo "  Browse more: hf models ls --search <query> --apps $ENGINE_NAME --sort downloads"
+    echo ""
+  fi
   read -rp "  Model to serve (enter to use default): " model_input
   [[ -n "$model_input" ]] && model="$model_input"
   save_config_value "$ENGINE_MODEL_VAR" "$model"

@@ -1,5 +1,7 @@
 # vLLM engine module for dgx-tools. Fully implemented — the reference
-# pattern for adding other engines (see lib/engines/*.sh placeholders).
+# pattern for a "one image + --model flag, HF-hosted" engine (see
+# lib/engines/*.sh placeholders). For the opposite shape — one image per
+# model, external registry auth — see lib/engines/nim.sh instead.
 #
 # NVIDIA's own vLLM deployment guidance for DGX Spark-class (Blackwell
 # sm_121 + ARM64) hardware is Docker-only: upstream vLLM's native build

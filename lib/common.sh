@@ -238,6 +238,17 @@ except Exception:
   echo "${max_ctx:-131072}"
 }
 
+# True if the current engine actually maps this setting to a real config
+# var name (vs. load_engine()'s "_DGXT_UNSET" placeholder sentinel). Some
+# settings (context length, GPU memory fraction, tool-call parser) don't
+# apply to every engine — e.g. NIM's containers are fully self-tuned per
+# GPU profile and have no equivalent knobs. Used to skip printing/saving
+# a setting (and, critically, to avoid writing a line literally named
+# "_DGXT_UNSET=..." to ~/.dgxtrc) for engines that don't define it.
+engine_defines_var() {
+  [[ "$1" != "_DGXT_UNSET" ]]
+}
+
 # Delegates to the current engine module's own resolve_tool_call_parser()
 # if it defines one (only vllm.sh does today — parser names/detection are
 # engine-specific). Falls back to ENGINE_DEFAULT_TOOL_CALL_PARSER (or
