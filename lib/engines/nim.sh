@@ -66,9 +66,13 @@ engine_run_container() {
   # docker login is itself idempotent/fast, so just always run it rather
   # than trying (unreliably) to detect prior auth from ~/.docker/config.json.
   echo "Logging in to nvcr.io..."
-  if ! echo "$ngc_api_key" | docker login nvcr.io --username '$oauthtoken' --password-stdin >/dev/null 2>&1; then
-    echo "ERROR: docker login nvcr.io failed. Check that $ENGINE_API_KEY_VAR is a valid NGC API key." >&2
-    echo "  $ENGINE_API_KEY_HINT" >&2
+  if ! echo "$ngc_api_key" | docker login nvcr.io --username '$oauthtoken' --password-stdin; then
+    echo "" >&2
+    echo "ERROR: docker login nvcr.io failed (see docker's error above)." >&2
+    echo "  Common causes: the key's scope doesn't include 'NGC Catalog'/container" >&2
+    echo "  registry access (check when generating it), or your account hasn't" >&2
+    echo "  accepted the EULA for this specific image yet — visit its NGC catalog" >&2
+    echo "  page and click 'Get Container' once. $ENGINE_API_KEY_HINT" >&2
     return 1
   fi
 
