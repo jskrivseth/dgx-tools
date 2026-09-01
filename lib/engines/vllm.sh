@@ -47,22 +47,25 @@ ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
 # on these specific values. Format: "id|approx size|note"
-ENGINE_DEFAULT_MODEL="Qwen/Qwen3-32B"
+ENGINE_DEFAULT_MODEL="nvidia/Qwen3.6-35B-A3B-NVFP4"
 ENGINE_RECOMMENDED_MODELS=(
-  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|best perf, DGX-optimized quantization"
+  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|best perf, DGX-optimized quantization (default)"
+  "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
-  "Qwen/Qwen3-32B|~64GB|full precision (default)"
+  "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
 )
 
 # vLLM's OpenAI-compatible server rejects any request with tool/function
 # definitions (as every agentic coding CLI sends) unless tool calling is
 # explicitly enabled with a parser matched to the model's tool-call output
-# format. All models recommended above are Qwen3-family, which emit
-# <tool_call>...</tool_call> XML — hence "qwen3_xml". This is only used as
-# a last-resort fallback (see resolve_tool_call_parser below); override
-# VLLM_TOOL_CALL_PARSER (or set it to empty) if serving a different model
-# family; see: https://docs.vllm.ai/en/latest/features/tool_calling.html
+# format. Most models recommended above are Qwen3-family, which emit
+# <tool_call>...</tool_call> XML — hence "qwen3_xml" as the last-resort
+# fallback below. gpt-oss-120b is the one exception (matched by its own
+# GptOss case in resolve_tool_call_parser/resolve_reasoning_parser, so it
+# never hits this fallback). Override VLLM_TOOL_CALL_PARSER (or set it to
+# empty) if serving some other model family that also falls through; see:
+# https://docs.vllm.ai/en/latest/features/tool_calling.html
 ENGINE_DEFAULT_TOOL_CALL_PARSER="qwen3_xml"
 
 # Same rationale as above but for --reasoning-parser: all models
