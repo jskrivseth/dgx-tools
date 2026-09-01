@@ -44,6 +44,27 @@ ENGINE_REASONING_PARSER_VAR="VLLM_REASONING_PARSER"
 # translates it into the --moe-backend CLI flag (see there for why).
 ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 
+# Repetition-penalty default for the OpenAI-compatible server. This exists
+# because of a real, observed failure mode: Qwen3-family models (all
+# recommended models above except gpt-oss-120b) can fall into repetition
+# loops -- repeating the same sentence, or the same no-op tool call, over
+# and over -- especially in long agentic/tool-use sessions. Qwen's own
+# model card recommends presence_penalty=1.5 to fix this, but
+# presence_penalty can ONLY be set per-request by the calling client
+# (vLLM has no server-side default/fallback for it -- see
+# ModelConfig.get_diff_sampling_param, which only recognizes
+# repetition_penalty/temperature/top_k/top_p/min_p/max_new_tokens as
+# overridable server-side defaults). Most agentic CLI/IDE harnesses don't
+# send presence_penalty at all, so the model never gets the correction
+# it needs regardless of what the server operator wants. repetition_penalty
+# IS one of those server-side-overridable params, so we default it to a
+# conservative 1.1 here (within Qwen's own suggested 1.05-1.15 troubleshooting
+# range) applied transparently to every request via --override-generation-config,
+# regardless of whether the client sets anything. Set to empty to disable
+# (e.g. if you find it makes output blander for your workload) or override
+# to tune the strength.
+ENGINE_REPETITION_PENALTY_VAR="VLLM_REPETITION_PENALTY"
+
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
 # on these specific values. Format: "id|approx size|note"
@@ -240,6 +261,18 @@ engine_run_container() {
   local max_len_args=()
   [[ -n "$max_len" ]] && max_len_args=(--max-model-len "$max_len")
 
+  # Repetition-penalty default (see ENGINE_REPETITION_PENALTY_VAR above
+  # for the full story on why this exists and why repetition_penalty,
+  # not presence_penalty, is the right lever here). Applied via
+  # --override-generation-config so it's a transparent server-side
+  # default -- still overridden per-request by any client that sends its
+  # own repetition_penalty, and skipped entirely if set to empty.
+  local repetition_penalty="${VLLM_REPETITION_PENALTY-1.1}"
+  local repetition_penalty_args=()
+  if [[ -n "$repetition_penalty" ]]; then
+    repetition_penalty_args=(--override-generation-config "{\"repetition_penalty\":${repetition_penalty}}")
+  fi
+
   # NVFP4 MoE backend override (see ENGINE_MOE_BACKEND_VAR above for why
   # this defaults to unset/auto rather than forcing "cutlass"). There is
   # no VLLM_MOE_BACKEND *env var* -- vLLM's kernel selection
@@ -347,6 +380,7 @@ engine_run_container() {
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
     "${max_len_args[@]}" \
+    "${repetition_penalty_args[@]}" \
     "${moe_backend_args[@]}" \
     "${gptoss_args[@]}" \
     "${qwen38_args[@]}" \
