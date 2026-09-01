@@ -28,11 +28,18 @@ ENGINE_PORT_VAR="VLLM_PORT"
 ENGINE_GPU_MEM_VAR="VLLM_GPU_MEM"
 ENGINE_TOOL_CALL_PARSER_VAR="VLLM_TOOL_CALL_PARSER"
 ENGINE_REASONING_PARSER_VAR="VLLM_REASONING_PARSER"
-# MoE backend for NVFP4 models on Blackwell (SM120). Marlin (the vLLM
-# default) falls back to emulated FP4 compute on SM120, which is
-# ~2.5-3x slower. CUTLASS or CUTEDSL use the native FP4 tensor cores.
-# Default to cutlass; override with VLLM_MOE_BACKEND=cutedsl if you
-# prefer the AMD Quark path. Set to empty to disable (use Marlin).
+# MoE backend for NVFP4 models on Blackwell (SM120). vLLM's own "auto"
+# oracle (vllm.config.kernel.KernelConfig.moe_backend, default) already
+# picks the best backend per MoE layer -- including falling back to
+# Marlin for weight-only (W4A16) NVFP4 layers that CUTLASS/CuteDSL can't
+# handle, which some "mixed" NVFP4 checkpoints (nvidia/modelopt_mixed
+# quant_algo, e.g. combining NVFP4/W4A16_NVFP4/MXFP8 across layers) do
+# contain. Forcing a single backend for the whole model skips that
+# per-layer fallback and can crash on load ("does not support the
+# deployment configuration") for such checkpoints, so we leave this
+# unset (auto) by default. Only set VLLM_MOE_BACKEND if you've verified
+# your specific checkpoint is pure NVFP4 (W4A4) end to end, in which case
+# "cutlass" forces the native FP4 tensor cores instead of auto's pick.
 # NOTE: there is no vLLM env var of this name -- engine_run_container
 # translates it into the --moe-backend CLI flag (see there for why).
 ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
@@ -219,16 +226,15 @@ engine_run_container() {
   local max_len_args=()
   [[ -n "$max_len" ]] && max_len_args=(--max-model-len "$max_len")
 
-  # NVFP4 MoE on Blackwell (SM120): Marlin falls back to emulated FP4
-  # compute (~2.5-3x slower). Pass CUTLASS backend to use native FP4
-  # tensor cores. There is no VLLM_MOE_BACKEND *env var* -- vLLM's kernel
-  # selection (vllm.config.kernel.KernelConfig.moe_backend) is CLI-only,
-  # set via --moe-backend; an env var of the same name is silently
-  # ignored (and logged as "Unknown vLLM environment variable"). We keep
+  # NVFP4 MoE backend override (see ENGINE_MOE_BACKEND_VAR above for why
+  # this defaults to unset/auto rather than forcing "cutlass"). There is
+  # no VLLM_MOE_BACKEND *env var* -- vLLM's kernel selection
+  # (vllm.config.kernel.KernelConfig.moe_backend) is CLI-only, set via
+  # --moe-backend; an env var of the same name is silently ignored (and
+  # logged as "Unknown vLLM environment variable"). We keep
   # VLLM_MOE_BACKEND as dgxt's own config var name for continuity, but
-  # translate it into --moe-backend here. User can override with
-  # VLLM_MOE_BACKEND env var or set it to empty to disable (use Marlin).
-  local moe_backend="${VLLM_MOE_BACKEND:-cutlass}"
+  # translate it into --moe-backend here, only when the user has set it.
+  local moe_backend="${VLLM_MOE_BACKEND:-}"
   local moe_backend_args=()
   [[ -n "$moe_backend" ]] && moe_backend_args=(--moe-backend "$moe_backend")
 
