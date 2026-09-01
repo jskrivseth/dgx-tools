@@ -254,11 +254,22 @@ engine_run_container() {
   #     working attention backend for this model on this hardware.
   # See: https://github.com/vllm-project/vllm/issues/37030 and
   # https://conselara.dev/notes/gpt-oss-120b-single-dgx-spark/
-  local gptoss_env=() gptoss_args=()
+  local gptoss_env=() gptoss_args=() gptoss_vol=()
   case "$model" in
     *gpt-oss*|*GptOss*|*GPTOss*)
       gptoss_env=(-e "VLLM_MXFP4_BACKEND=marlin")
       gptoss_args=(--attention-backend TRITON_ATTN)
+      # Harmony tokenizer vocab fetch (see ensure_tiktoken_cache in
+      # lib/common.sh for the full story) -- pre-fetch it to a persistent
+      # host dir and point the container at it, so this never depends on
+      # in-container network at request time. Best-effort: if priming
+      # fails (offline right now, no curl, etc.) we still set the env var
+      # and mount the (possibly empty) dir -- vLLM just falls back to its
+      # own live fetch into that same mounted dir instead of /tmp, which
+      # is at least no worse than today, and self-heals on next start.
+      ensure_tiktoken_cache || true
+      gptoss_env+=(-e "TIKTOKEN_RS_CACHE_DIR=/root/tiktoken_cache")
+      gptoss_vol=(-v "${TIKTOKEN_CACHE_DIR}:/root/tiktoken_cache")
       ;;
   esac
 
@@ -275,6 +286,7 @@ engine_run_container() {
     "${allow_long_env[@]}" \
     "${gptoss_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
+    "${gptoss_vol[@]}" \
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
     "${max_len_args[@]}" \

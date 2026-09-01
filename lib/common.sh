@@ -9,6 +9,52 @@ DEFAULT_CONFIG_FILE="$HOME/.dgxtrc"
 # always agree on where models live — shared across every engine.
 HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
 
+# Persistent host cache dir for the tiktoken-rs vocab file gpt-oss's
+# Harmony tokenizer needs (see ensure_tiktoken_cache below).
+TIKTOKEN_CACHE_DIR="${TIKTOKEN_CACHE_DIR:-$HOME/.cache/dgxt/tiktoken}"
+
+# gpt-oss's Harmony tokenizer (openai_harmony, a Rust/tiktoken-rs
+# extension) lazily fetches its o200k_base vocab file from a hardcoded
+# Microsoft blob-storage CDN URL on the FIRST real chat request, not at
+# model load -- so `dgxt start`'s healthcheck can pass clean and your
+# first actual request still 500s with "failed to download or load vocab
+# file" (openai_harmony.HarmonyError). We've observed this fail
+# intermittently even when the container's network path to that exact
+# URL works fine (plain curl succeeds) -- tiktoken-rs's own tiny fetch
+# client apparently isn't as reliable. Avoid depending on in-container
+# network for this at all: pre-fetch the vocab file here, into a
+# persistent host dir, using the *exact* cache-key filename tiktoken-rs
+# expects (sha1 hex of the vocab URL) -- its own cache-hit logic then
+# finds it pre-populated with a matching hash and skips the network
+# fetch entirely. See lib/engines/vllm.sh's gpt-oss case in
+# engine_run_container for where this cache dir gets mounted in.
+# Best-effort: any failure here (no curl, no network right now, etc.)
+# just leaves the cache unprimed, and vLLM falls back to its own
+# (unreliable) live fetch instead -- not a hard error.
+ensure_tiktoken_cache() {
+  mkdir -p "$TIKTOKEN_CACHE_DIR" 2>/dev/null || return 1
+  local url="https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+  local expected_sha256="446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+  command -v python3 >/dev/null 2>&1 || return 1
+  local cache_key
+  cache_key=$(python3 -c "import hashlib,sys; print(hashlib.sha1(sys.argv[1].encode()).hexdigest())" "$url" 2>/dev/null)
+  [[ -z "$cache_key" ]] && return 1
+  local dest="$TIKTOKEN_CACHE_DIR/$cache_key"
+
+  actual_sha256() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+  if [[ -f "$dest" ]] && [[ "$(actual_sha256 "$dest")" == "$expected_sha256" ]]; then
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsSL -o "$dest.tmp" "$url" 2>/dev/null || { rm -f "$dest.tmp"; return 1; }
+  if [[ "$(actual_sha256 "$dest.tmp")" != "$expected_sha256" ]]; then
+    rm -f "$dest.tmp"
+    return 1
+  fi
+  mv "$dest.tmp" "$dest"
+}
+
 # Load config file (key=value, one per line). Env vars already set in the
 # environment take priority and are left untouched.
 load_config() {
