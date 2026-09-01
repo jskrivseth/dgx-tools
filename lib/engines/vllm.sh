@@ -28,6 +28,12 @@ ENGINE_PORT_VAR="VLLM_PORT"
 ENGINE_GPU_MEM_VAR="VLLM_GPU_MEM"
 ENGINE_TOOL_CALL_PARSER_VAR="VLLM_TOOL_CALL_PARSER"
 ENGINE_REASONING_PARSER_VAR="VLLM_REASONING_PARSER"
+# MoE backend for NVFP4 models on Blackwell (SM120). Marlin (the vLLM
+# default) falls back to emulated FP4 compute on SM120, which is
+# ~2.5-3x slower. CUTLASS or CUTEDSL use the native FP4 tensor cores.
+# Default to cutlass; override with VLLM_MOE_BACKEND=cutedsl if you
+# prefer the AMD Quark path. Set to empty to disable (use Marlin).
+ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
@@ -211,6 +217,14 @@ engine_run_container() {
   local max_len_args=()
   [[ -n "$max_len" ]] && max_len_args=(--max-model-len "$max_len")
 
+  # NVFP4 MoE on Blackwell (SM120): Marlin falls back to emulated FP4
+  # compute (~2.5-3x slower). Pass CUTLASS backend to use native FP4
+  # tensor cores. User can override with VLLM_MOE_BACKEND env var or
+  # set it to empty to disable (use Marlin).
+  local moe_backend="${VLLM_MOE_BACKEND:-cutlass}"
+  local moe_backend_args=()
+  [[ -n "$moe_backend" ]] && moe_backend_args=(-e "VLLM_MOE_BACKEND=$moe_backend")
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -222,6 +236,7 @@ engine_run_container() {
     -e HF_TOKEN="${HF_TOKEN:-}" \
     -e VLLM_API_KEY="$api_key" \
     "${allow_long_env[@]}" \
+    "${moe_backend_args[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
