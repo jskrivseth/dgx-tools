@@ -105,7 +105,7 @@ over the file** — export something and it wins, no editing required:
 ```bash
 # ~/.dgxtrc
 DGXT_ENGINE=vllm
-VLLM_MODEL=nvidia/Qwen3.6-35B-A3B-NVFP4
+VLLM_MODEL=unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
 VLLM_MAX_MODEL_LEN=131072
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000
@@ -263,7 +263,7 @@ weights it doesn't.
 ```bash
 # ~/.dgxtrc with DGXT_ENGINE=vllm
 DGXT_ENGINE=vllm
-VLLM_MODEL=nvidia/Qwen3.6-35B-A3B-NVFP4
+VLLM_MODEL=unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
 VLLM_MAX_MODEL_LEN=131072
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000

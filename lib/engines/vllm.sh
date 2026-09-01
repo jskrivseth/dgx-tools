@@ -47,9 +47,10 @@ ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
 # on these specific values. Format: "id|approx size|note"
-ENGINE_DEFAULT_MODEL="nvidia/Qwen3.6-35B-A3B-NVFP4"
+ENGINE_DEFAULT_MODEL="unsloth/Qwen3.6-35B-A3B-NVFP4-Fast"
 ENGINE_RECOMMENDED_MODELS=(
-  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|best perf, DGX-optimized quantization (default)"
+  "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|best perf on this hardware -- verified ~71.5 tok/s single-stream via FlashInfer B12X MoE backend, same accuracy as the plain NVFP4 checkpoint (default)"
+  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|previous default; auto MoE backend, safe fallback if the Fast checkpoint ever regresses"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
   "unsloth/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, needs FlashInfer + atomic-add workaround (handled automatically)"
@@ -247,9 +248,32 @@ engine_run_container() {
   # logged as "Unknown vLLM environment variable"). We keep
   # VLLM_MOE_BACKEND as dgxt's own config var name for continuity, but
   # translate it into --moe-backend here, only when the user has set it.
+  # unsloth's "-Fast" NVFP4 checkpoints (e.g. the new default,
+  # Qwen3.6-35B-A3B-NVFP4-Fast) are a different, purely-NVFP4 calibration
+  # from nvidia's mixed-quant checkpoints above -- they explicitly
+  # document (and this was verified live on this box: ~71.5 tok/s
+  # single-stream, correct output) that auto-selection picks Marlin,
+  # which their own docs say is ~2x slower here. flashinfer_b12x is the
+  # backend their recipe calls for, so default to it for this model
+  # pattern specifically rather than leaving auto/unset like the mixed
+  # checkpoints above. Still overridable via VLLM_MOE_BACKEND (including
+  # setting it empty to fall back to auto).
   local moe_backend="${VLLM_MOE_BACKEND:-}"
+  case "$model" in
+    *NVFP4-Fast*) moe_backend="${VLLM_MOE_BACKEND:-flashinfer_b12x}" ;;
+  esac
   local moe_backend_args=()
   [[ -n "$moe_backend" ]] && moe_backend_args=(--moe-backend "$moe_backend")
+
+  # Same "-Fast" checkpoint family also needs CUTE_DSL_ARCH set for its
+  # CuteDSL-based kernels to target this GPU's actual compute capability
+  # -- the checkpoint's own DGX Spark docs call out "you will get 2x
+  # slower inference" without it. See:
+  # https://huggingface.co/unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
+  local fast_env=()
+  case "$model" in
+    *NVFP4-Fast*) fast_env=(-e "CUTE_DSL_ARCH=sm_121a") ;;
+  esac
 
   # gpt-oss (native MXFP4, attention sinks) needs two Blackwell
   # (SM120/SM121) correctness workarounds that no other recommended model
@@ -317,6 +341,7 @@ engine_run_container() {
     "${allow_long_env[@]}" \
     "${gptoss_env[@]}" \
     "${qwen38_env[@]}" \
+    "${fast_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "${gptoss_vol[@]}" \
     "$ENGINE_IMAGE" \
