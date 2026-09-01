@@ -614,19 +614,48 @@ cmd_setup() {
   local model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
   echo "  Current default: $model"
   echo ""
+
+  # Build a single numbered picker: already-downloaded models first (ready
+  # to serve right now, no wait), then the hardcoded recommendations that
+  # aren't already downloaded. picks[N] maps a menu number to a model id.
+  local -a picks=()
+  local cached_list cached_line cid csize entry mid size note already_listed
+
+  cached_list=$(list_cached_models)
+  if [[ -n "$cached_list" ]]; then
+    echo "  Already downloaded (ready to serve now):"
+    while IFS='|' read -r cid csize; do
+      [[ -z "$cid" ]] && continue
+      picks+=("$cid")
+      printf "    %2d) %-46s %s\n" "${#picks[@]}" "$cid" "$csize"
+    done <<< "$cached_list"
+    echo ""
+  fi
+
   echo "  Recommended models for this box:"
-  local entry mid size note
   for entry in "${ENGINE_RECOMMENDED_MODELS[@]}"; do
     IFS='|' read -r mid size note <<< "$entry"
-    printf "    %-38s %-8s %s\n" "$mid" "$size" "$note"
+    already_listed="0"
+    for cid in "${picks[@]}"; do
+      [[ "$cid" == "$mid" ]] && already_listed="1" && break
+    done
+    [[ "$already_listed" == "1" ]] && continue
+    picks+=("$mid")
+    printf "    %2d) %-46s %-8s %s\n" "${#picks[@]}" "$mid" "$size" "$note"
   done
   echo ""
   if [[ -n "${ENGINE_HF_APPS_FILTER:-}" ]]; then
     echo "  Browse more: hf models ls --search <query> --apps $ENGINE_NAME --sort downloads"
     echo ""
   fi
-  read -rp "  Model to serve (enter to use default): " model_input
-  [[ -n "$model_input" ]] && model="$model_input"
+  read -rp "  Model to serve (number above, a HF model id, or enter to use default): " model_input
+  if [[ -n "$model_input" ]]; then
+    if [[ "$model_input" =~ ^[0-9]+$ && "$model_input" -ge 1 && "$model_input" -le "${#picks[@]}" ]]; then
+      model="${picks[$((model_input - 1))]}"
+    else
+      model="$model_input"
+    fi
+  fi
   save_config_value "$ENGINE_MODEL_VAR" "$model"
 
   echo ""

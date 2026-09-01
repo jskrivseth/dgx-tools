@@ -383,3 +383,54 @@ cmd_model_list() {
   ensure_hf_cli || return 1
   hf cache ls
 }
+
+# Print "repo_id|size" for models already fully cached locally, one per
+# line, largest-complete-download-looking first. Used by cmd_setup's
+# model picker so users can select something they've already pulled
+# instead of retyping a HF id from memory. Best-effort: silently prints
+# nothing if `hf` isn't installed or cache is empty/unparseable — this is
+# a convenience list, not a hard requirement.
+#
+# Filters out repos under MIN_CACHED_MODEL_BYTES: `hf download` leaves a
+# tiny metadata-only cache entry (just config.json etc, often <1MB) the
+# moment a download starts, even if it's incomplete or was only used to
+# probe --arch. Those aren't actually servable, so they'd be misleading
+# in a "ready to serve now" list.
+MIN_CACHED_MODEL_BYTES=$((1024 * 1024 * 1024)) # 1 GiB
+list_cached_models() {
+  command -v hf >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  hf cache ls --format json 2>/dev/null | python3 -c '
+import json, sys
+
+def to_bytes(size_str):
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    size_str = size_str.strip()
+    if size_str and size_str[-1] in units:
+        try:
+            return float(size_str[:-1]) * units[size_str[-1]]
+        except ValueError:
+            return 0
+    try:
+        return float(size_str)
+    except ValueError:
+        return 0
+
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+rows = []
+for e in entries:
+    if e.get("repo_type") != "model":
+        continue
+    size_bytes = to_bytes(e.get("size", "0"))
+    if size_bytes < '"$MIN_CACHED_MODEL_BYTES"':
+        continue
+    rows.append((size_bytes, e.get("repo_id", ""), e.get("size", "")))
+
+for size_bytes, repo_id, size in sorted(rows, reverse=True):
+    print(f"{repo_id}|{size}")
+' 2>/dev/null
+}
