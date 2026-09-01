@@ -51,6 +51,8 @@ ENGINE_DEFAULT_MODEL="nvidia/Qwen3.6-35B-A3B-NVFP4"
 ENGINE_RECOMMENDED_MODELS=(
   "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|best perf, DGX-optimized quantization (default)"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
+  "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
+  "unsloth/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, needs FlashInfer + atomic-add workaround (handled automatically)"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -125,6 +127,14 @@ resolve_tool_call_parser() {
   fi
 
   case "$arch" in
+    # Dense qwen3_5 (Qwen3_5ForConditionalGeneration, e.g. Qwen3.8-27B) is
+    # matched before the generic *Qwen3* catch-all below: it emits
+    # OpenAI-style tool calls, not the <tool_call> XML the MoE Qwen3
+    # family (Qwen3_5MoeForConditionalGeneration etc.) uses -- confirmed
+    # against the model's own published vLLM recipe. Don't broaden this
+    # pattern to also match the Moe variant; that path is qwen3_xml and
+    # already verified working.
+    *Qwen3_5ForConditionalGeneration*) echo "qwen3_coder" ;;
     *Qwen3Coder*|*Qwen3_5Moe*|*Qwen3Moe*|*Qwen3*) echo "qwen3_xml" ;;
     *Qwen2*) echo "hermes" ;;
     *Llama4*) echo "llama4_pythonic" ;;
@@ -273,6 +283,27 @@ engine_run_container() {
       ;;
   esac
 
+  # Qwen3.8-27B (dense, hybrid Gated DeltaNet + Gated Attention, qwen3_5
+  # arch) needs two workarounds on this hardware that no other
+  # recommended model does, per the day-zero DGX Spark recipe this was
+  # verified against:
+  #   - FlashInfer is the attention backend that actually gets picked
+  #     (sm121 xqa decode kernel) and supports the FP8 KV cache this
+  #     model's recipe uses; other recommended models don't need it
+  #     forced since their defaults already land elsewhere.
+  #   - VLLM_MARLIN_USE_ATOMIC_ADD=1 is a hardware-specific Marlin kernel
+  #     workaround copied from the working recipe rather than derived --
+  #     without it this model's quantized layers can hit incorrect
+  #     accumulation on this GPU.
+  # See: https://blog.kubesimplify.com/qwen3-8-27b-on-dgx-spark
+  local qwen38_env=() qwen38_args=()
+  case "$model" in
+    *Qwen3.8*|*qwen3.8*)
+      qwen38_env=(-e "VLLM_MARLIN_USE_ATOMIC_ADD=1")
+      qwen38_args=(--attention-backend FLASHINFER)
+      ;;
+  esac
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -285,6 +316,7 @@ engine_run_container() {
     -e VLLM_API_KEY="$api_key" \
     "${allow_long_env[@]}" \
     "${gptoss_env[@]}" \
+    "${qwen38_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "${gptoss_vol[@]}" \
     "$ENGINE_IMAGE" \
@@ -292,6 +324,7 @@ engine_run_container() {
     "${max_len_args[@]}" \
     "${moe_backend_args[@]}" \
     "${gptoss_args[@]}" \
+    "${qwen38_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \
