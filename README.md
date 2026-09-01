@@ -6,14 +6,149 @@ native builds, no dependency wrangling beyond Docker and the official
 HuggingFace CLI.
 
 Currently implemented: **vLLM** and **NIM**. Placeholders exist for
-TensorRT-LLM, SGLang, llama.cpp, and Ollama (see [Engines](#engines) below).
+TensorRT-LLM, SGLang, llama.cpp, and Ollama (see [Engines](#engines)).
 
 dgxt does **not** reimplement anything the `hf` CLI already does well —
 searching, downloading, cache management, and auth are all thin
 passthroughs to `hf`. dgxt's job is only the Docker lifecycle (start,
 stop, config) around whichever engine you pick.
 
-## Prerequisites
+## Getting dgxt
+
+```bash
+git clone https://github.com/jskrivseth/dgx-tools.git ~/dgx-tools
+cd ~/dgx-tools
+./dgxt help
+```
+
+No build step, no install step — it's a single bash script (`dgxt`) plus
+a small `lib/` of sourced helpers. Optionally put it on your `PATH`:
+
+```bash
+ln -s ~/dgx-tools/dgxt ~/bin/dgxt   # if ~/bin is already on your PATH
+```
+
+Needs Docker (with the NVIDIA Container Toolkit) and the `hf` CLI. Both
+are checked at runtime — if `hf` is missing, dgxt offers to install it
+for you via pip right then. See [Prerequisites](#prerequisites) in the
+appendix if either check fails.
+
+## Quick start
+
+```bash
+./dgxt setup
+```
+
+Walks through, in order: engine selection (default `vllm`; `nim` for
+NVIDIA's curated containers), a Docker check, HuggingFace auth, an API
+key (generated for you, or pasted for NIM), and a model pick from a
+short recommended list (or type your own model ID) — then starts the
+container and streams logs until the server is healthy.
+
+## Everyday commands
+
+```bash
+./dgxt start [model] [--max-context N]   # start serving (default model/context if omitted)
+./dgxt stop                              # stop and remove the container
+./dgxt restart [model]                   # stop then start
+./dgxt logs                              # tail container logs
+./dgxt status                            # is it running?
+./dgxt config                            # show effective settings (file + env, merged)
+./dgxt save                              # persist current settings to ~/.dgxtrc
+```
+
+`--max-context` accepts plain token counts or K/M shorthand (`64k` ==
+`65536`, `256k` == `262144`, `1m` == `1048576`). Left unset, dgxt targets
+256K tokens capped to whatever the model actually natively supports.
+Asking for more than a model's native max works too — see
+[Context extension](#context-extension-past-a-models-native-max) in the
+appendix for how (and where it can't).
+
+Once running, the server speaks the OpenAI-compatible API:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: ****** VLLM_API_KEY>" \
+  -d '{"model":"<model>","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
+```
+
+## Not reimplemented — use `hf` directly
+
+dgxt only wraps three things as thin conveniences; everything else is a
+direct passthrough to `hf` (or NGC, for NIM — see the
+[appendix](#hf--ngc-passthrough-details) for how that differs):
+
+```bash
+./dgxt search <query>       # -> hf models ls --search <query> --sort downloads
+./dgxt model-pull <model>   # -> hf download <model>  (pre-fetch before starting)
+./dgxt model-list           # -> hf cache ls
+```
+
+For anything beyond that — browsing by author/params, verifying cache
+integrity, pruning incomplete downloads, switching HF accounts — just use
+`hf` directly:
+
+```bash
+hf models ls --search llama --num-parameters min:6B,max:32B --sort downloads
+hf cache ls
+hf cache prune          # clean up incomplete/orphaned downloads
+hf auth login / hf auth whoami
+```
+
+## Configuration
+
+Settings live in `~/.dgxtrc` (created by `dgxt save` or `dgxt setup`), as
+plain `KEY=value` lines. **Environment variables always take priority
+over the file** — export something and it wins, no editing required:
+
+```bash
+# ~/.dgxtrc
+DGXT_ENGINE=vllm
+VLLM_MODEL=nvidia/Qwen3.6-35B-A3B-NVFP4
+VLLM_MAX_MODEL_LEN=131072
+VLLM_API_KEY=<random, generated for you>
+VLLM_PORT=8000
+VLLM_GPU_MEM=0.8
+HF_TOKEN=hf_...
+```
+
+NIM uses a different set of keys — see the
+[appendix](#full-config-file-examples) for its example and the
+differences (no GPU-memory knob, an external API key that can't be
+auto-generated).
+
+## Engines
+
+```bash
+./dgxt engine            # show current engine + list all, with status
+./dgxt engine <name>      # switch (persists to ~/.dgxtrc)
+```
+
+| Engine | Status |
+|---|---|
+| `vllm` | ready |
+| `nim` | ready |
+| `tensorrt-llm` | planned |
+| `sglang` | planned |
+| `llama-cpp` | planned |
+| `ollama` | planned |
+
+Adding a new engine means writing one small file in `lib/engines/` — a
+handful of variables (container name, config-file variable names,
+recommended models) plus one function that runs `docker run`. Everything
+else — Docker lifecycle, health-check waiting, log streaming, HF
+passthroughs, config save/load, random API key generation — is shared in
+`lib/common.sh` and just works once the engine module is filled in.
+`lib/engines/vllm.sh` is the reference for a "one image + `--model` flag,
+HF-hosted, auto-generated API key" engine; `lib/engines/nim.sh` is the
+reference for the opposite shape — one image per model, an external
+registry API key that must never be auto-generated, and no
+context-length/GPU-memory knobs at all.
+
+## Troubleshooting / Appendix
+
+### Prerequisites
 
 This assumes a genuinely clean box — nothing pre-set-up, nothing assumed
 except what typically ships on a DGX Spark / DGX OS image:
@@ -70,51 +205,7 @@ sudo usermod -aG docker "$USER"
 newgrp docker      # or just log out and back in
 ```
 
-## Getting dgxt
-
-```bash
-git clone https://github.com/jskrivseth/dgx-tools.git ~/dgx-tools
-cd ~/dgx-tools
-./dgxt help
-```
-
-No build step, no install step — it's a single bash script (`dgxt`) plus
-a small `lib/` of sourced helpers. Optionally put it on your `PATH`:
-
-```bash
-ln -s ~/dgx-tools/dgxt ~/bin/dgxt   # if ~/bin is already on your PATH
-```
-
-## Quick start
-
-```bash
-./dgxt setup
-```
-
-This walks through, in order:
-1. **Engine selection** — defaults to `vllm`; switch to `nim` for NVIDIA's curated, self-tuned containers (`./dgxt engine nim`)
-2. **Docker check** — tells you the exact fix command if it's not accessible
-3. **HuggingFace auth** — checks `hf auth whoami`, offers to run `hf auth login` if not logged in, and mirrors the token into your config for the container to use (skipped for engines like NIM that don't use HF)
-4. **API key** — generates and saves a random key if you don't have one (never serves on the LAN with a fixed/guessable key); for NIM, prompts you to paste a real NGC API key instead, since that one can't be invented
-5. **Model pick** — shows a short list of recommended models for this hardware, or type your own (a HuggingFace model ID for vLLM, an NGC image tag for NIM)
-
-...then starts the container and streams logs until the server is healthy.
-
-## Everyday commands
-
-```bash
-./dgxt start [model] [--max-context N]   # start serving (default model/context if omitted)
-./dgxt stop                              # stop and remove the container
-./dgxt restart [model]                   # stop then start
-./dgxt logs                              # tail container logs
-./dgxt status                            # is it running?
-./dgxt config                            # show effective settings (file + env, merged)
-./dgxt save                              # persist current settings to ~/.dgxtrc
-```
-
-`--max-context` (and the underlying `VLLM_MAX_MODEL_LEN`/`NIM_MAX_MODEL_LEN`
-config vars) accept plain token counts or binary K/M shorthand: `64k` ==
-`65536`, `256k` == `262144`, `1m` == `1048576`.
+### Context extension past a model's native max
 
 **Default context (no flag/config value set)**: dgxt aims for 256K tokens,
 capped to whatever the model actually natively supports (checked against
@@ -141,35 +232,16 @@ errors. On confirmation:
   vLLM (`dgxt engine vllm`) if you need genuine context extension past a
   model's native max.
 
-Once running, the server speaks the OpenAI-compatible API:
+### hf / NGC passthrough details
 
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <your VLLM_API_KEY>" \
-  -d '{"model":"<model>","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
-```
-
-## Not reimplemented — use `hf` directly
-
-dgxt only wraps three things as thin conveniences (so you don't need to
-remember `hf` flags just to get a model running); everything else is a
-direct passthrough:
-
-```bash
-./dgxt search <query>       # vllm/HF-based engines -> hf models ls --search <query> --sort downloads
-./dgxt model-pull <model>   # -> hf download <model>  (pre-fetch before starting)
-./dgxt model-list           # -> hf cache ls
-```
-
-All three work for NIM too, just against NGC instead of HF: `search`
-queries NGC's public catalog search API directly (no NGC CLI/API key
-needed just to browse) and flags which results are confirmed
-ARM64/DGX-Spark-native vs. likely x86_64-only; `model-pull` pre-pulls the
-Docker image (not the model weights inside it — those download from NGC
-into `~/.cache/nim` on first container start, NIM exposes no separate
-step for that); `model-list` shows locally pulled NIM images instead of
-the HF cache.
+All three convenience commands (`search`, `model-pull`, `model-list`)
+work for NIM too, just against NGC instead of HF: `search` queries NGC's
+public catalog search API directly (no NGC CLI/API key needed just to
+browse) and flags which results are confirmed ARM64/DGX-Spark-native vs.
+likely x86_64-only; `model-pull` pre-pulls the Docker image (not the
+model weights inside it — those download from NGC into `~/.cache/nim` on
+first container start, NIM exposes no separate step for that);
+`model-list` shows locally pulled NIM images instead of the HF cache.
 
 ```bash
 ./dgxt search qwen   # (with DGXT_ENGINE=nim)
@@ -179,25 +251,17 @@ the HF cache.
 #       qwen-2.5-72b-instruct                     <- likely x86_64-only
 ```
 
-For anything beyond that — browsing by author/params, verifying cache
-integrity, pruning incomplete downloads, switching HF accounts — just use
-`hf` directly:
+`model-pull` also excludes each repo's `original/` and `metal/` folders
+by default (unless you pass your own `--include`/`--exclude`) — vLLM
+never reads these, but `hf download` grabs them anyway if unfiltered.
+`openai/gpt-oss-120b` is the case that matters most: ~63GB of MXFP4
+safetensors vLLM actually loads vs. 100GB+ of `original/` bf16 reference
+weights it doesn't.
+
+### Full config file examples
 
 ```bash
-hf models ls --search llama --num-parameters min:6B,max:32B --sort downloads
-hf cache ls
-hf cache prune          # clean up incomplete/orphaned downloads
-hf auth login / hf auth whoami
-```
-
-## Configuration
-
-Settings live in `~/.dgxtrc` (created by `dgxt save` or `dgxt setup`), as
-plain `KEY=value` lines. **Environment variables always take priority
-over the file** — export something and it wins, no editing required:
-
-```bash
-# ~/.dgxtrc
+# ~/.dgxtrc with DGXT_ENGINE=vllm
 DGXT_ENGINE=vllm
 VLLM_MODEL=nvidia/Qwen3.6-35B-A3B-NVFP4
 VLLM_MAX_MODEL_LEN=131072
@@ -221,35 +285,7 @@ NIM_PORT=8000
 # NIM_MAX_MODEL_LEN=64k   # optional -- unset lets NIM's own profile decide
 ```
 
-## Engines
-
-```bash
-./dgxt engine            # show current engine + list all, with status
-./dgxt engine <name>      # switch (persists to ~/.dgxtrc)
-```
-
-| Engine | Status |
-|---|---|
-| `vllm` | ready |
-| `nim` | ready |
-| `tensorrt-llm` | planned |
-| `sglang` | planned |
-| `llama-cpp` | planned |
-| `ollama` | planned |
-
-Adding a new engine means writing one small file in `lib/engines/` — a
-handful of variables (container name, config-file variable names,
-recommended models) plus one function that runs `docker run`. Everything
-else — Docker lifecycle, health-check waiting, log streaming, HF
-passthroughs, config save/load, random API key generation — is shared in
-`lib/common.sh` and just works once the engine module is filled in.
-`lib/engines/vllm.sh` is the reference for a "one image + `--model` flag,
-HF-hosted, auto-generated API key" engine; `lib/engines/nim.sh` is the
-reference for the opposite shape — one image per model, an external
-registry API key that must never be auto-generated, and no
-context-length/GPU-memory knobs at all.
-
-## Troubleshooting
+### Common errors
 
 **"Docker not accessible"** — you're not in the `docker` group yet, or
 just joined it and haven't started a new shell. See
