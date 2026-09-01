@@ -33,6 +33,8 @@ ENGINE_REASONING_PARSER_VAR="VLLM_REASONING_PARSER"
 # ~2.5-3x slower. CUTLASS or CUTEDSL use the native FP4 tensor cores.
 # Default to cutlass; override with VLLM_MOE_BACKEND=cutedsl if you
 # prefer the AMD Quark path. Set to empty to disable (use Marlin).
+# NOTE: there is no vLLM env var of this name -- engine_run_container
+# translates it into the --moe-backend CLI flag (see there for why).
 ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 
 # Recommended models for a DGX Spark-class box (128GB unified memory).
@@ -219,11 +221,16 @@ engine_run_container() {
 
   # NVFP4 MoE on Blackwell (SM120): Marlin falls back to emulated FP4
   # compute (~2.5-3x slower). Pass CUTLASS backend to use native FP4
-  # tensor cores. User can override with VLLM_MOE_BACKEND env var or
-  # set it to empty to disable (use Marlin).
+  # tensor cores. There is no VLLM_MOE_BACKEND *env var* -- vLLM's kernel
+  # selection (vllm.config.kernel.KernelConfig.moe_backend) is CLI-only,
+  # set via --moe-backend; an env var of the same name is silently
+  # ignored (and logged as "Unknown vLLM environment variable"). We keep
+  # VLLM_MOE_BACKEND as dgxt's own config var name for continuity, but
+  # translate it into --moe-backend here. User can override with
+  # VLLM_MOE_BACKEND env var or set it to empty to disable (use Marlin).
   local moe_backend="${VLLM_MOE_BACKEND:-cutlass}"
   local moe_backend_args=()
-  [[ -n "$moe_backend" ]] && moe_backend_args=(-e "VLLM_MOE_BACKEND=$moe_backend")
+  [[ -n "$moe_backend" ]] && moe_backend_args=(--moe-backend "$moe_backend")
 
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
@@ -236,11 +243,11 @@ engine_run_container() {
     -e HF_TOKEN="${HF_TOKEN:-}" \
     -e VLLM_API_KEY="$api_key" \
     "${allow_long_env[@]}" \
-    "${moe_backend_args[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
     "${max_len_args[@]}" \
+    "${moe_backend_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \
