@@ -241,6 +241,27 @@ engine_run_container() {
   local moe_backend_args=()
   [[ -n "$moe_backend" ]] && moe_backend_args=(--moe-backend "$moe_backend")
 
+  # gpt-oss (native MXFP4, attention sinks) needs two Blackwell
+  # (SM120/SM121) correctness workarounds that no other recommended model
+  # does. Auto-selected backends are actively broken here, not just slow:
+  #   - CUTLASS/FlashInfer MXFP4 kernels corrupt output on this hardware
+  #     (garbled tokens / null content on the first response). Marlin is
+  #     the only MXFP4 backend confirmed correct here. This IS a real env
+  #     var (unlike VLLM_MOE_BACKEND above) -- vLLM reads it directly.
+  #   - FlashInfer attention doesn't implement gpt-oss's attention-sinks
+  #     mechanism at all: hard startup crash ("attention sinks not
+  #     supported"), not a silent fallback. TRITON_ATTN is the only
+  #     working attention backend for this model on this hardware.
+  # See: https://github.com/vllm-project/vllm/issues/37030 and
+  # https://conselara.dev/notes/gpt-oss-120b-single-dgx-spark/
+  local gptoss_env=() gptoss_args=()
+  case "$model" in
+    *gpt-oss*|*GptOss*|*GPTOss*)
+      gptoss_env=(-e "VLLM_MXFP4_BACKEND=marlin")
+      gptoss_args=(--attention-backend TRITON_ATTN)
+      ;;
+  esac
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -252,11 +273,13 @@ engine_run_container() {
     -e HF_TOKEN="${HF_TOKEN:-}" \
     -e VLLM_API_KEY="$api_key" \
     "${allow_long_env[@]}" \
+    "${gptoss_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "$ENGINE_IMAGE" \
     vllm serve "$model" \
     "${max_len_args[@]}" \
     "${moe_backend_args[@]}" \
+    "${gptoss_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \

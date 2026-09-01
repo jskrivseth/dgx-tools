@@ -364,13 +364,26 @@ cmd_search() {
 # downloads itself; we only guarantee the cache dir is writable first.
 cmd_model_pull() {
   local model="${1:-${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}}"
+  [[ $# -gt 0 ]] && shift
   if declare -f engine_model_pull >/dev/null 2>&1; then
-    engine_model_pull "$model"
+    engine_model_pull "$model" "$@"
     return
   fi
   ensure_hf_cli || return 1
   ensure_hub_cache || return 1
-  hf download "$model"
+  # vLLM only ever loads the top-level safetensors + config/tokenizer
+  # files. Some repos also ship an original/ (reference bf16/fp32
+  # checkpoint, meant for other runtimes) or metal/ (Apple MLX) folder
+  # alongside the vLLM-ready weights -- openai/gpt-oss-120b is a prime
+  # example: ~63GB of MXFP4 safetensors plus 100GB+ of original/ that
+  # vLLM never reads, more than doubling the download for nothing.
+  # Exclude both by default; skip this if the caller already passed
+  # their own --include/--exclude (trust their judgement over ours).
+  local exclude_args=()
+  if [[ "$*" != *--include* && "$*" != *--exclude* ]]; then
+    exclude_args=(--exclude "original/*" --exclude "metal/*")
+  fi
+  hf download "$model" "${exclude_args[@]}" "$@"
 }
 
 # List downloaded models. Delegates to engine_model_list() if the current
