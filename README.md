@@ -59,7 +59,8 @@ container and streams logs until the server is healthy.
 
 `--max-context` accepts plain token counts or K/M shorthand (`64k` ==
 `65536`, `256k` == `262144`, `1m` == `1048576`). Left unset, dgxt targets
-256K tokens capped to whatever the model actually natively supports.
+1M tokens capped to whatever the model actually natively supports. With the
+default Nemotron model, DSpark speculative decoding is enabled automatically.
 Asking for more than a model's native max works too — see
 [Context extension](#context-extension-past-a-models-native-max) in the
 appendix for how (and where it can't).
@@ -69,6 +70,17 @@ native MTP head with five speculative tokens, the FlashInfer/atomic-add
 workarounds, and the bounded batching settings from the DGX Spark reference
 recipe. Set `VLLM_MTP_TOKENS=0` to disable MTP, or use another positive value
 to test a different speculative depth.
+
+For `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, dgxt automatically
+applies NVIDIA's GB10 backend recipe: FlashInfer for Mamba, aligned Mamba
+caches, FP8 KV cache, prefix caching, Marlin for MoE, and DSpark speculative
+decoding with three tokens. It uses an 8192-token batch budget so speculative
+draft slots do not constrain scheduling, and the recipe's `0.85` GPU-memory
+fraction unless `VLLM_GPU_MEM` is explicitly set. Set
+`VLLM_SPECULATIVE_MODE=none` for a non-speculative baseline, or select `mtp`
+or `dflash` for explicit experiments. `VLLM_SPECULATIVE_MODEL` overrides the
+derived DSpark/DFlash draft model ID, and `VLLM_SPECULATIVE_TOKENS` controls
+the draft length.
 
 Once running, the server speaks the OpenAI-compatible API:
 
@@ -111,11 +123,13 @@ over the file** — export something and it wins, no editing required:
 ```bash
 # ~/.dgxtrc
 DGXT_ENGINE=vllm
-VLLM_MODEL=unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
-VLLM_MAX_MODEL_LEN=131072
+VLLM_MODEL=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+VLLM_MAX_MODEL_LEN=1m
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000
-VLLM_GPU_MEM=0.8
+VLLM_GPU_MEM=0.85
+VLLM_SPECULATIVE_MODE=dspark
+VLLM_SPECULATIVE_TOKENS=3
 HF_TOKEN=hf_...
 ```
 
@@ -213,9 +227,9 @@ newgrp docker      # or just log out and back in
 
 ### Context extension past a model's native max
 
-**Default context (no flag/config value set)**: dgxt aims for 256K tokens,
+**Default context (no flag/config value set)**: dgxt aims for 1M tokens,
 capped to whatever the model actually natively supports (checked against
-the model's own `config.json`) — a long-context model gets the full 256K
+the model's own `config.json`) — Nemotron gets its full 1M window
 automatically, while a shorter-context model safely falls back to its own
 real ceiling instead of silently over-requesting.
 
@@ -223,8 +237,9 @@ For Qwen3.8, use `dgxt restart unsloth/Qwen3.8-27B-NVFP4 --max-context 1m`
 to opt into the model's documented 1M YaRN extension. dgxt preserves the
 model's multimodal RoPE fields and nests the override under `text_config`;
 using a partial top-level override will not correctly extend this checkpoint.
-The default remains 256K because YaRN is static and can reduce short-context
-quality. The forum measurements used about `0.60` GPU memory utilization for
+dgxt does not silently apply YaRN to models whose native context is shorter
+than 1M, because static YaRN can reduce short-context quality. The forum
+measurements used about `0.60` GPU memory utilization for
 1M; the default `0.8` leaves more KV capacity but less unified-memory
 headroom, so lower `VLLM_GPU_MEM` if other workloads share the machine.
 
@@ -278,11 +293,13 @@ weights it doesn't.
 ```bash
 # ~/.dgxtrc with DGXT_ENGINE=vllm
 DGXT_ENGINE=vllm
-VLLM_MODEL=unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
-VLLM_MAX_MODEL_LEN=131072
+VLLM_MODEL=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+VLLM_MAX_MODEL_LEN=1m
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000
-VLLM_GPU_MEM=0.8
+VLLM_GPU_MEM=0.85
+VLLM_SPECULATIVE_MODE=dspark
+VLLM_SPECULATIVE_TOKENS=3
 HF_TOKEN=hf_...
 ```
 

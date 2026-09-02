@@ -314,16 +314,15 @@ resolve_max_context() {
 
 # Preferred default context length when nothing else specifies one (no
 # --max-context flag, no persisted VLLM_MAX_MODEL_LEN/NIM_MAX_MODEL_LEN).
-# 256K is a reasonable "aim high" target for agentic-coding workloads
-# (large repos, tool output, long multi-turn sessions) without forcing
-# every model to this value regardless of what it actually supports.
-DEFAULT_PREFERRED_CONTEXT=262144
+# Aim for the 1M window supported by the default Nemotron deployment, while
+# still capping other models to whatever they actually support.
+DEFAULT_PREFERRED_CONTEXT=1048576
 
 # The actual "auto" resolution used by cmd_start/cmd_save/cmd_config when
 # no explicit context was requested: aim for DEFAULT_PREFERRED_CONTEXT,
 # but never silently exceed what the model actually supports (its real
 # derived native max from resolve_max_context) — so a long-context model
-# (e.g. nvidia/Qwen3.6-35B-A3B-NVFP4, native 262144) gets the full 256K
+# (e.g. Nemotron 3.5 Lightning, native 1048576) gets the full 1M
 # automatically, while a shorter-context model (e.g. Qwen3-32B, native
 # 40960) safely falls back to its own real ceiling instead of requesting
 # more than it can serve. If the native max is unknown (resolve_max_context
@@ -376,6 +375,17 @@ resolve_reasoning_parser_for_engine() {
     resolve_reasoning_parser "$model"
   else
     echo "${ENGINE_DEFAULT_REASONING_PARSER:-}"
+  fi
+}
+
+# Same idea, for the GPU memory fraction. Engines may choose a
+# model-specific default while still honoring their configured value.
+resolve_gpu_memory_for_engine() {
+  local model="$1"
+  if declare -f resolve_gpu_memory >/dev/null 2>&1; then
+    resolve_gpu_memory "$model"
+  else
+    echo "${!ENGINE_GPU_MEM_VAR:-0.8}"
   fi
 }
 

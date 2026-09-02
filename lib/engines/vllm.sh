@@ -65,12 +65,28 @@ ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 # to tune the strength.
 ENGINE_REPETITION_PENALTY_VAR="VLLM_REPETITION_PENALTY"
 
+# Nemotron's official DGX Spark recipe uses 0.85. Keep an explicit
+# VLLM_GPU_MEM override authoritative, but select that value automatically
+# for Nemotron when no setting exists.
+resolve_gpu_memory() {
+  local model="$1"
+  if [[ -n "${VLLM_GPU_MEM:-}" ]]; then
+    echo "$VLLM_GPU_MEM"
+    return
+  fi
+  case "$model" in
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*) echo "0.85" ;;
+    *) echo "0.8" ;;
+  esac
+}
+
 # Recommended models for a DGX Spark-class box (128GB unified memory).
 # Edit this list for your own hardware/preferences — nothing else depends
 # on these specific values. Format: "id|approx size|note"
-ENGINE_DEFAULT_MODEL="unsloth/Qwen3.6-35B-A3B-NVFP4-Fast"
+ENGINE_DEFAULT_MODEL="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 ENGINE_RECOMMENDED_MODELS=(
-  "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|best perf on this hardware -- verified ~71.5 tok/s single-stream via FlashInfer B12X MoE backend, same accuracy as the plain NVFP4 checkpoint (default)"
+  "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4|~22GB|recommended DGX Spark default -- 1M context and DSpark speculative decoding"
+  "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|best perf on this hardware -- verified ~71.5 tok/s single-stream via FlashInfer B12X MoE backend, same accuracy as the plain NVFP4 checkpoint"
   "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|previous default; auto MoE backend, safe fallback if the Fast checkpoint ever regresses"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
@@ -325,6 +341,26 @@ engine_run_container() {
   local moe_backend_args=()
   [[ -n "$moe_backend" ]] && moe_backend_args=(--moe-backend "$moe_backend")
 
+  # NVIDIA's Nemotron 3.5 Lightning GB10 recipe uses FlashInfer for the
+  # Mamba path, aligned Mamba caches, FP8 KV cache, prefix caching, and
+  # Marlin for MoE. Keep these settings model-specific: other checkpoints
+  # have different backend requirements. An explicit VLLM_MOE_BACKEND still
+  # overrides the model-specific Marlin default above.
+  local nemotron_args=()
+  case "$model" in
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+      [[ -n "$moe_backend" ]] || moe_backend="marlin"
+      moe_backend_args=(--moe-backend "$moe_backend")
+      nemotron_args=(
+        --mamba-backend flashinfer
+        --mamba-cache-mode align
+        --kv-cache-dtype fp8
+        --enable-prefix-caching
+        --max-num-batched-tokens 8192
+      )
+      ;;
+  esac
+
   # Same "-Fast" checkpoint family also needs CUTE_DSL_ARCH set for its
   # CuteDSL-based kernels to target this GPU's actual compute capability
   # -- the checkpoint's own DGX Spark docs call out "you will get 2x
@@ -407,6 +443,59 @@ engine_run_container() {
       ;;
   esac
 
+  # DSpark is NVIDIA's recommended speculative decoder for Nemotron on
+  # DGX Spark and low-concurrency interactive workloads. Keep alternatives
+  # opt-in because their draft checkpoints and compatibility vary by vLLM
+  # release. Set VLLM_SPECULATIVE_MODE=none to restore a non-speculative
+  # baseline, or select mtp/dflash for explicit experiments.
+  case "$model" in
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+      local speculative_mode="${VLLM_SPECULATIVE_MODE:-dspark}"
+      local speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-3}"
+      case "${speculative_mode,,}" in
+        none)
+          ;;
+        dspark)
+          if [[ ! "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+            return 1
+          fi
+          local dspark_model="${VLLM_SPECULATIVE_MODEL:-${model}-DSpark}"
+          speculative_args=(
+            --speculative_config.num_speculative_tokens "$speculative_tokens"
+            --speculative_config.model "$dspark_model"
+          )
+          ;;
+        mtp)
+          if [[ ! "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+            return 1
+          fi
+          speculative_args=(
+            --speculative_config.method mtp
+            --speculative_config.num_speculative_tokens "$speculative_tokens"
+          )
+          ;;
+        dflash)
+          if [[ ! "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+            return 1
+          fi
+          local dflash_model="${VLLM_SPECULATIVE_MODEL:-${model}-DFlash}"
+          speculative_args=(
+            --speculative_config.method dflash
+            --speculative_config.num_speculative_tokens "$speculative_tokens"
+            --speculative_config.model "$dflash_model"
+          )
+          ;;
+        *)
+          echo "ERROR: VLLM_SPECULATIVE_MODE must be dspark, none, mtp, or dflash." >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -428,6 +517,7 @@ engine_run_container() {
     "${max_len_args[@]}" \
     "${repetition_penalty_args[@]}" \
     "${moe_backend_args[@]}" \
+    "${nemotron_args[@]}" \
     "${gptoss_args[@]}" \
     "${qwen38_args[@]}" \
     "${speculative_args[@]}" \
