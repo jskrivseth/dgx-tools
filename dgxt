@@ -55,7 +55,9 @@
 # --- end help ---
 set -euo pipefail
 
-DGXT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the repository root through a PATH symlink (e.g.
+# ~/.local/bin/dgxt) before loading the sibling lib/ directory.
+DGXT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$DGXT_ROOT/lib/common.sh"
 

@@ -64,6 +64,12 @@ Asking for more than a model's native max works too — see
 [Context extension](#context-extension-past-a-models-native-max) in the
 appendix for how (and where it can't).
 
+For `unsloth/Qwen3.8-27B-NVFP4`, dgxt automatically enables the checkpoint's
+native MTP head with five speculative tokens, the FlashInfer/atomic-add
+workarounds, and the bounded batching settings from the DGX Spark reference
+recipe. Set `VLLM_MTP_TOKENS=0` to disable MTP, or use another positive value
+to test a different speculative depth.
+
 Once running, the server speaks the OpenAI-compatible API:
 
 ```bash
@@ -213,11 +219,20 @@ the model's own `config.json`) — a long-context model gets the full 256K
 automatically, while a shorter-context model safely falls back to its own
 real ceiling instead of silently over-requesting.
 
+For Qwen3.8, use `dgxt restart unsloth/Qwen3.8-27B-NVFP4 --max-context 1m`
+to opt into the model's documented 1M YaRN extension. dgxt preserves the
+model's multimodal RoPE fields and nests the override under `text_config`;
+using a partial top-level override will not correctly extend this checkpoint.
+The default remains 256K because YaRN is static and can reduce short-context
+quality. The forum measurements used about `0.60` GPU memory utilization for
+1M; the default `0.8` leaves more KV capacity but less unified-memory
+headroom, so lower `VLLM_GPU_MEM` if other workloads share the machine.
+
 **Explicitly requesting more than a model's native max**: dgxt warns and
 asks before starting, since exceeding it risks incorrect output or CUDA
 errors. On confirmation:
 - **vLLM**: genuinely extends context via YaRN RoPE scaling
-  (`--rope-scaling`), not just a bypass flag — the factor/original-max are
+  (`--hf-overrides`), not just a bypass flag — the factor/original-max are
   auto-computed from the model's native max, and `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`
   is also set. Override with `VLLM_ROPE_SCALING_FACTOR` /
   `VLLM_ROPE_SCALING_ORIGINAL_MAX` if you know a better-validated value for

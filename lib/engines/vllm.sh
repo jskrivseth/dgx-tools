@@ -239,16 +239,23 @@ engine_run_container() {
   # v0.11.1+ (the version `vllm/vllm-openai:latest` now tracks) -- passing
   # it makes `vllm serve` reject the whole command with "unrecognized
   # arguments", the same failure mode as the old --enable-reasoning flag.
-  # RoPE/YaRN scaling must now be injected via --hf-overrides, and current
-  # transformers configs key this as "rope_parameters" (older configs used
-  # "rope_scaling" -- vLLM's HF-overrides merge accepts either name, but
-  # "rope_parameters" is what newer model configs actually read). See:
+  # RoPE/YaRN scaling must now be injected via --hf-overrides. Most models
+  # read rope_parameters at the top level, but Qwen3.8 stores it under
+  # text_config and requires the complete multimodal RoPE object because
+  # hf-overrides replaces nested dictionaries rather than merging them. See:
   # https://docs.vllm.ai/en/latest/features/context_extension/
   local rope_args=()
   local rope_factor="${VLLM_ROPE_SCALING_FACTOR:-${ROPE_SCALING_FACTOR:-}}"
   if [[ -n "$rope_factor" ]]; then
     local rope_original="${VLLM_ROPE_SCALING_ORIGINAL_MAX:-${ROPE_SCALING_ORIGINAL_MAX:-}}"
-    rope_args=(--hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original}}}")
+    case "$model" in
+      *Qwen3.8*|*qwen3.8*)
+        rope_args=(--hf-overrides "{\"text_config\":{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original},\"mrope_interleaved\":true,\"mrope_section\":[11,11,10],\"partial_rotary_factor\":0.25,\"rope_theta\":10000000}}}")
+        ;;
+      *)
+        rope_args=(--hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original}}}")
+        ;;
+    esac
   fi
 
   # Only pass --max-model-len if dgxt actually resolved a value. If
@@ -341,7 +348,7 @@ engine_run_container() {
   esac
 
   # Qwen3.8-27B (dense, hybrid Gated DeltaNet + Gated Attention, qwen3_5
-  # arch) needs two workarounds on this hardware that no other
+  # arch) needs these workarounds on this hardware that no other
   # recommended model does, per the day-zero DGX Spark recipe this was
   # verified against:
   #   - FlashInfer is the attention backend that actually gets picked
@@ -352,12 +359,31 @@ engine_run_container() {
   #     workaround copied from the working recipe rather than derived --
   #     without it this model's quantized layers can hit incorrect
   #     accumulation on this GPU.
+  #   - Its checkpoint includes a native MTP head. Five speculative tokens
+  #     is the reference setting and roughly doubles decode throughput on
+  #     this workload; set VLLM_MTP_TOKENS=0 to disable it for comparison.
   # See: https://blog.kubesimplify.com/qwen3-8-27b-on-dgx-spark
-  local qwen38_env=() qwen38_args=()
+  local qwen38_env=() qwen38_args=() speculative_args=()
   case "$model" in
     *Qwen3.8*|*qwen3.8*)
       qwen38_env=(-e "VLLM_MARLIN_USE_ATOMIC_ADD=1")
-      qwen38_args=(--attention-backend FLASHINFER)
+      qwen38_args=(
+        --attention-backend FLASHINFER
+        --max-num-seqs 4
+        --max-num-batched-tokens 8192
+        --enable-chunked-prefill
+        --enable-prefix-caching
+        --distributed-executor-backend mp
+      )
+      local mtp_tokens="${VLLM_MTP_TOKENS:-5}"
+      if [[ "$mtp_tokens" == "0" ]]; then
+        :
+      elif [[ "$mtp_tokens" =~ ^[1-9][0-9]*$ ]]; then
+        speculative_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${mtp_tokens}}")
+      else
+        echo "ERROR: VLLM_MTP_TOKENS must be 0 or a positive integer." >&2
+        return 1
+      fi
       ;;
   esac
 
@@ -384,6 +410,7 @@ engine_run_container() {
     "${moe_backend_args[@]}" \
     "${gptoss_args[@]}" \
     "${qwen38_args[@]}" \
+    "${speculative_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \
