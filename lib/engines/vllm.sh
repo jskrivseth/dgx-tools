@@ -85,10 +85,11 @@ ENGINE_RECOMMENDED_MODELS=(
 # explicitly enabled with a parser matched to the model's tool-call output
 # format. Most models recommended above are Qwen3-family, which emit
 # <tool_call>...</tool_call> XML — hence "qwen3_xml" as the last-resort
-# fallback below. gpt-oss-120b is the one exception (matched by its own
-# GptOss case in resolve_tool_call_parser/resolve_reasoning_parser, so it
-# never hits this fallback). Override VLLM_TOOL_CALL_PARSER (or set it to
-# empty) if serving some other model family that also falls through; see:
+# fallback below. Nemotron 3.5 Lightning uses the Qwen-compatible
+# qwen3_coder parser, while gpt-oss-120b is matched by its own GptOss case
+# in resolve_tool_call_parser/resolve_reasoning_parser. Override
+# VLLM_TOOL_CALL_PARSER (or set it to empty) if serving some other model
+# family that also falls through; see:
 # https://docs.vllm.ai/en/latest/features/tool_calling.html
 ENGINE_DEFAULT_TOOL_CALL_PARSER="qwen3_xml"
 
@@ -142,6 +143,15 @@ except Exception:
 resolve_tool_call_parser() {
   local model="$1"
   local arch
+
+  # NVIDIA's official Nemotron 3.5 Lightning vLLM recipe uses the
+  # Qwen-compatible parser. Match the model ID before the HF lookup so a
+  # temporary metadata/network failure cannot silently disable or misparse
+  # tool calls for this known model.
+  case "$model" in
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*) echo "qwen3_coder"; return ;;
+  esac
+
   arch=$(resolve_model_architecture "$model")
   if [[ -z "$arch" ]]; then
     echo "$ENGINE_DEFAULT_TOOL_CALL_PARSER"
@@ -166,6 +176,7 @@ resolve_tool_call_parser() {
     *InternLM*) echo "internlm" ;;
     *Jamba*) echo "jamba" ;;
     *GptOss*|*GPTOss*) echo "openai" ;;
+    *NemotronH*) echo "qwen3_coder" ;;
     *Glm4*) echo "glm45" ;;
     *) echo "" ;;
   esac
@@ -185,6 +196,14 @@ resolve_tool_call_parser() {
 resolve_reasoning_parser() {
   local model="$1"
   local arch
+
+  # Nemotron 3.5 Lightning emits reasoning in the Nemotron v3 format.
+  # Match its model ID before the HF lookup for the same offline-safe
+  # behavior as resolve_tool_call_parser().
+  case "$model" in
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*) echo "nemotron_v3"; return ;;
+  esac
+
   arch=$(resolve_model_architecture "$model")
   if [[ -z "$arch" ]]; then
     echo "$ENGINE_DEFAULT_REASONING_PARSER"
@@ -199,6 +218,7 @@ resolve_reasoning_parser() {
     *Glm4*) echo "glm45" ;;
     *Mistral*|*Mixtral*) echo "mistral" ;;
     *GptOss*|*GPTOss*) echo "openai_gptoss" ;;
+    *NemotronH*) echo "nemotron_v3" ;;
     *) echo "" ;;
   esac
 }
