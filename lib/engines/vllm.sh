@@ -240,8 +240,8 @@ engine_run_container() {
   # it makes `vllm serve` reject the whole command with "unrecognized
   # arguments", the same failure mode as the old --enable-reasoning flag.
   # RoPE/YaRN scaling must now be injected via --hf-overrides. Most models
-  # read rope_parameters at the top level, but Qwen3.8 stores it under
-  # text_config and requires the complete multimodal RoPE object because
+  # read rope_parameters at the top level, but Qwen3.6 and Qwen3.8 store it
+  # under text_config and require the complete multimodal RoPE object because
   # hf-overrides replaces nested dictionaries rather than merging them. See:
   # https://docs.vllm.ai/en/latest/features/context_extension/
   local rope_args=()
@@ -249,7 +249,7 @@ engine_run_container() {
   if [[ -n "$rope_factor" ]]; then
     local rope_original="${VLLM_ROPE_SCALING_ORIGINAL_MAX:-${ROPE_SCALING_ORIGINAL_MAX:-}}"
     case "$model" in
-      *Qwen3.8*|*qwen3.8*)
+      *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*)
         rope_args=(--hf-overrides "{\"text_config\":{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":${rope_factor},\"original_max_position_embeddings\":${rope_original},\"mrope_interleaved\":true,\"mrope_section\":[11,11,10],\"partial_rotary_factor\":0.25,\"rope_theta\":10000000}}}")
         ;;
       *)
