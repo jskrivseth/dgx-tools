@@ -343,9 +343,12 @@ engine_run_container() {
 
   # NVIDIA's Nemotron 3.5 Lightning GB10 recipe uses FlashInfer for the
   # Mamba path, aligned Mamba caches, FP8 KV cache, prefix caching, and
-  # Marlin for MoE. Keep these settings model-specific: other checkpoints
-  # have different backend requirements. An explicit VLLM_MOE_BACKEND still
-  # overrides the model-specific Marlin default above.
+  # Marlin for MoE. Long-prefill scheduling is bounded to 2048 tokens so up
+  # to 16 low-concurrency requests can interleave instead of one running
+  # prefill consuming the entire scheduler budget. Keep these settings
+  # model-specific: other checkpoints have different backend requirements.
+  # An explicit VLLM_MOE_BACKEND still overrides the model-specific Marlin
+  # default above.
   local nemotron_args=()
   case "$model" in
     *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
@@ -356,7 +359,9 @@ engine_run_container() {
         --mamba-cache-mode align
         --kv-cache-dtype fp8
         --enable-prefix-caching
-        --max-num-batched-tokens 8192
+        --max-num-batched-tokens 32768
+        --long-prefill-token-threshold 2048
+        --max-num-seqs 16
       )
       ;;
   esac

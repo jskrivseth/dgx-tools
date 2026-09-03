@@ -74,9 +74,10 @@ to test a different speculative depth.
 For `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, dgxt automatically
 applies NVIDIA's GB10 backend recipe: FlashInfer for Mamba, aligned Mamba
 caches, FP8 KV cache, prefix caching, Marlin for MoE, and DSpark speculative
-decoding with three tokens. It uses an 8192-token batch budget so speculative
-draft slots do not constrain scheduling, and the recipe's `0.85` GPU-memory
-fraction unless `VLLM_GPU_MEM` is explicitly set. Set
+decoding with three tokens. It uses 2048-token prefill chunks inside a
+32768-token batch budget so up to 16 low-concurrency requests can interleave
+instead of queueing behind one long prefill. It also uses the recipe's `0.85`
+GPU-memory fraction unless `VLLM_GPU_MEM` is explicitly set. Set
 `VLLM_SPECULATIVE_MODE=none` for a non-speculative baseline, or select `mtp`
 or `dflash` for explicit experiments. `VLLM_SPECULATIVE_MODEL` overrides the
 derived DSpark/DFlash draft model ID, and `VLLM_SPECULATIVE_TOKENS` controls
