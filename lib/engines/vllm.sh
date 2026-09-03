@@ -11,7 +11,10 @@
 ENGINE_NAME="vllm"
 ENGINE_STATUS="ready"
 ENGINE_CONTAINER_NAME="vllm-server"
-ENGINE_IMAGE="vllm/vllm-openai:latest"
+# The stable v0.28.0 image still misroutes RadixArk's Qwen3 DSpark draft.
+# Nightly contains the upstream architecture normalization and publishes an
+# ARM64 variant for DGX Spark.
+ENGINE_IMAGE="vllm/vllm-openai:nightly"
 ENGINE_HF_APPS_FILTER="vllm"
 # vLLM can genuinely extend a model past its native context via YaRN RoPE
 # scaling (unlike NIM's precompiled engines, which have no such knob) --
@@ -90,7 +93,7 @@ ENGINE_RECOMMENDED_MODELS=(
   "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|previous default; auto MoE backend, safe fallback if the Fast checkpoint ever regresses"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
-  "unsloth/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, needs FlashInfer + atomic-add workaround (handled automatically)"
+  "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -239,6 +242,74 @@ resolve_reasoning_parser() {
   esac
 }
 
+is_qwen38_model() {
+  case "$1" in
+    *Qwen3.8*|*qwen3.8*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+configure_qwen38_profile() {
+  local model="$1"
+  local default_speculative_mode="mtp"
+  local speculative_mode
+  local speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-${VLLM_MTP_TOKENS:-}}"
+
+  QWEN38_ENV_ARGS=(-e "VLLM_MARLIN_USE_ATOMIC_ADD=1")
+  QWEN38_ARGS=(
+    --attention-backend FLASHINFER
+    --max-num-seqs 4
+    --max-num-batched-tokens 8192
+    --enable-chunked-prefill
+    --enable-prefix-caching
+    --distributed-executor-backend mp
+  )
+  QWEN38_SPECULATIVE_ARGS=()
+  QWEN38_SERVE_COMMAND=(vllm serve "$model")
+
+  case "$model" in
+    RadixArk/Qwen3.8-27B-NVFP4|radixark/Qwen3.8-27B-NVFP4)
+      default_speculative_mode="dspark"
+      ;;
+  esac
+  speculative_mode="${VLLM_SPECULATIVE_MODE:-$default_speculative_mode}"
+
+  case "${speculative_mode,,}" in
+    none)
+      ;;
+    mtp)
+      speculative_tokens="${speculative_tokens:-5}"
+      if [[ "$speculative_tokens" == "0" ]]; then
+        :
+      elif [[ "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+        QWEN38_SPECULATIVE_ARGS=(
+          --speculative-config
+          "{\"method\":\"mtp\",\"num_speculative_tokens\":${speculative_tokens}}"
+        )
+      else
+        echo "ERROR: VLLM_SPECULATIVE_TOKENS must be 0 or a positive integer." >&2
+        return 1
+      fi
+      ;;
+    dspark)
+      speculative_tokens="${speculative_tokens:-7}"
+      if [[ ! "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+        return 1
+      fi
+      local dspark_model="${VLLM_SPECULATIVE_MODEL:-RadixArk/Qwen3.8-27B-DSpark}"
+      QWEN38_SPECULATIVE_ARGS=(
+        --speculative-config
+        "{\"method\":\"dspark\",\"model\":\"${dspark_model}\",\"num_speculative_tokens\":${speculative_tokens}}"
+      )
+      ;;
+    *)
+      echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp, dspark, or none for Qwen3.8." >&2
+      return 1
+      ;;
+  esac
+}
+
 # Start the vLLM container. Called by the generic cmd_start in dgxt
 # after it has resolved model/max_len/port/gpu_mem/api_key/tool_call_parser/
 # reasoning_parser.
@@ -251,7 +322,7 @@ engine_run_container() {
   local reasoning_args=()
   if [[ -n "$reasoning_parser" ]]; then
     # --enable-reasoning was deprecated in vLLM v0.9.0 and removed in
-    # v0.10.0+ (which `vllm/vllm-openai:latest` now tracks) -- passing it
+    # v0.10.0+ (which `vllm/vllm-openai:nightly` now tracks) -- passing it
     # makes `vllm serve` reject the whole command with "unrecognized
     # arguments". Just --reasoning-parser now implicitly enables
     # reasoning-content extraction.
@@ -272,7 +343,7 @@ engine_run_container() {
   # directly for manual control.
   #
   # NOTE: the standalone `--rope-scaling` CLI flag was removed in vLLM
-  # v0.11.1+ (the version `vllm/vllm-openai:latest` now tracks) -- passing
+  # v0.11.1+ (the version `vllm/vllm-openai:nightly` now tracks) -- passing
   # it makes `vllm serve` reject the whole command with "unrecognized
   # arguments", the same failure mode as the old --enable-reasoning flag.
   # RoPE/YaRN scaling must now be injected via --hf-overrides. Most models
@@ -408,45 +479,15 @@ engine_run_container() {
       ;;
   esac
 
-  # Qwen3.8-27B (dense, hybrid Gated DeltaNet + Gated Attention, qwen3_5
-  # arch) needs these workarounds on this hardware that no other
-  # recommended model does, per the day-zero DGX Spark recipe this was
-  # verified against:
-  #   - FlashInfer is the attention backend that actually gets picked
-  #     (sm121 xqa decode kernel) and supports the FP8 KV cache this
-  #     model's recipe uses; other recommended models don't need it
-  #     forced since their defaults already land elsewhere.
-  #   - VLLM_MARLIN_USE_ATOMIC_ADD=1 is a hardware-specific Marlin kernel
-  #     workaround copied from the working recipe rather than derived --
-  #     without it this model's quantized layers can hit incorrect
-  #     accumulation on this GPU.
-  #   - Its checkpoint includes a native MTP head. Five speculative tokens
-  #     is the reference setting and roughly doubles decode throughput on
-  #     this workload; set VLLM_MTP_TOKENS=0 to disable it for comparison.
-  # See: https://blog.kubesimplify.com/qwen3-8-27b-on-dgx-spark
   local qwen38_env=() qwen38_args=() speculative_args=()
-  case "$model" in
-    *Qwen3.8*|*qwen3.8*)
-      qwen38_env=(-e "VLLM_MARLIN_USE_ATOMIC_ADD=1")
-      qwen38_args=(
-        --attention-backend FLASHINFER
-        --max-num-seqs 4
-        --max-num-batched-tokens 8192
-        --enable-chunked-prefill
-        --enable-prefix-caching
-        --distributed-executor-backend mp
-      )
-      local mtp_tokens="${VLLM_MTP_TOKENS:-5}"
-      if [[ "$mtp_tokens" == "0" ]]; then
-        :
-      elif [[ "$mtp_tokens" =~ ^[1-9][0-9]*$ ]]; then
-        speculative_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${mtp_tokens}}")
-      else
-        echo "ERROR: VLLM_MTP_TOKENS must be 0 or a positive integer." >&2
-        return 1
-      fi
-      ;;
-  esac
+  local qwen38_serve_command=(vllm serve "$model")
+  if is_qwen38_model "$model"; then
+    configure_qwen38_profile "$model" || return 1
+    qwen38_env=("${QWEN38_ENV_ARGS[@]}")
+    qwen38_args=("${QWEN38_ARGS[@]}")
+    speculative_args=("${QWEN38_SPECULATIVE_ARGS[@]}")
+    qwen38_serve_command=("${QWEN38_SERVE_COMMAND[@]}")
+  fi
 
   # DSpark is NVIDIA's recommended speculative decoder for Nemotron on
   # DGX Spark and low-concurrency interactive workloads. Keep alternatives
@@ -501,6 +542,12 @@ engine_run_container() {
       ;;
   esac
 
+  # Model profiles contribute only their matching environment, flags, and
+  # mounts; the container invocation below remains engine-generic.
+  local model_env=("${gptoss_env[@]}" "${qwen38_env[@]}" "${fast_env[@]}")
+  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}")
+  local model_volumes=("${gptoss_vol[@]}")
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -512,19 +559,15 @@ engine_run_container() {
     -e HF_TOKEN="${HF_TOKEN:-}" \
     -e VLLM_API_KEY="$api_key" \
     "${allow_long_env[@]}" \
-    "${gptoss_env[@]}" \
-    "${qwen38_env[@]}" \
-    "${fast_env[@]}" \
+    "${model_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
-    "${gptoss_vol[@]}" \
+    "${model_volumes[@]}" \
     "$ENGINE_IMAGE" \
-    vllm serve "$model" \
+    "${qwen38_serve_command[@]}" \
     "${max_len_args[@]}" \
     "${repetition_penalty_args[@]}" \
     "${moe_backend_args[@]}" \
-    "${nemotron_args[@]}" \
-    "${gptoss_args[@]}" \
-    "${qwen38_args[@]}" \
+    "${model_args[@]}" \
     "${speculative_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \

@@ -65,11 +65,16 @@ Asking for more than a model's native max works too — see
 [Context extension](#context-extension-past-a-models-native-max) in the
 appendix for how (and where it can't).
 
-For `unsloth/Qwen3.8-27B-NVFP4`, dgxt automatically enables the checkpoint's
-native MTP head with five speculative tokens, the FlashInfer/atomic-add
-workarounds, and the bounded batching settings from the DGX Spark reference
-recipe. Set `VLLM_MTP_TOKENS=0` to disable MTP, or use another positive value
-to test a different speculative depth.
+For `RadixArk/Qwen3.8-27B-NVFP4`, dgxt automatically selects the matching
+`RadixArk/Qwen3.8-27B-DSpark` draft checkpoint with its recommended seven-token
+draft block, in addition to the FlashInfer/atomic-add workarounds and bounded
+batching settings from the DGX Spark reference recipe. Selecting that model is
+therefore sufficient; no speculative-decoding flags are required. Set
+`VLLM_SPECULATIVE_MODE=none` for a baseline, or use `mtp` to select the target
+checkpoint's native MTP head. `VLLM_SPECULATIVE_MODEL` and
+`VLLM_SPECULATIVE_TOKENS` override the DSpark checkpoint and depth.
+`VLLM_MTP_TOKENS` remains accepted as a backwards-compatible alias for the MTP
+token count.
 
 For `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, dgxt automatically
 applies NVIDIA's GB10 backend recipe: FlashInfer for Mamba, aligned Mamba
@@ -234,15 +239,35 @@ the model's own `config.json`) — Nemotron gets its full 1M window
 automatically, while a shorter-context model safely falls back to its own
 real ceiling instead of silently over-requesting.
 
-For Qwen3.8, use `dgxt restart unsloth/Qwen3.8-27B-NVFP4 --max-context 1m`
-to opt into the model's documented 1M YaRN extension. dgxt preserves the
-model's multimodal RoPE fields and nests the override under `text_config`;
-using a partial top-level override will not correctly extend this checkpoint.
-dgxt does not silently apply YaRN to models whose native context is shorter
-than 1M, because static YaRN can reduce short-context quality. The forum
-measurements used about `0.60` GPU memory utilization for
-1M; the default `0.8` leaves more KV capacity but less unified-memory
-headroom, so lower `VLLM_GPU_MEM` if other workloads share the machine.
+For Qwen3.8, use the model selection directly; the RadixArk checkpoint
+automatically enables the separately trained DSpark drafter:
+
+```bash
+dgxt restart RadixArk/Qwen3.8-27B-NVFP4
+```
+
+The default matching draft model is
+`RadixArk/Qwen3.8-27B-DSpark`, with its recommended seven-token draft block.
+To explicitly override that default, set
+`VLLM_SPECULATIVE_MODE=dspark VLLM_SPECULATIVE_TOKENS=7`. This is a
+single-GPU, low-concurrency configuration; keep `VLLM_GPU_MEM` at or below
+`0.8` initially on GB10 because the CPU and GPU share the same 128 GB
+unified-memory pool. Use `VLLM_SPECULATIVE_MODE=mtp` to select the target
+checkpoint's native MTP head, or `none` for a baseline.
+
+To opt into the model's documented 1M YaRN extension, add
+`--max-context 1m` to the command above. dgxt preserves the model's
+multimodal RoPE fields and nests the override under `text_config`; using a
+partial top-level override will not correctly extend this checkpoint. dgxt
+does not silently apply YaRN to models whose native context is shorter than
+1M, because static YaRN can reduce short-context quality. The forum
+measurements used about `0.60` GPU memory utilization for 1M; the default
+`0.8` leaves more KV capacity but less unified-memory headroom, so lower
+`VLLM_GPU_MEM` if other workloads share the machine.
+
+The vLLM engine uses the ARM64 `vllm/vllm-openai:nightly` image because the
+stable v0.28.0 image misroutes RadixArk's `DSparkDraftModel` architecture.
+The nightly image includes the upstream native routing fix.
 
 **Explicitly requesting more than a model's native max**: dgxt warns and
 asks before starting, since exceeding it risks incorrect output or CUDA
