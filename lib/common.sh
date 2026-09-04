@@ -331,6 +331,14 @@ DEFAULT_PREFERRED_CONTEXT=1048576
 # convention.
 resolve_default_context() {
   local model="$1"
+  local engine_default
+  if declare -f resolve_default_context_override >/dev/null 2>&1; then
+    if engine_default=$(resolve_default_context_override "$model") && [[ -n "$engine_default" ]]; then
+      echo "$engine_default"
+      return
+    fi
+  fi
+
   local native_max
   native_max=$(resolve_max_context "$model")
   if [[ -z "$native_max" ]]; then
@@ -382,8 +390,9 @@ resolve_reasoning_parser_for_engine() {
 # model-specific default while still honoring their configured value.
 resolve_gpu_memory_for_engine() {
   local model="$1"
+  local max_len="${2:-}"
   if declare -f resolve_gpu_memory >/dev/null 2>&1; then
-    resolve_gpu_memory "$model"
+    resolve_gpu_memory "$model" "$max_len"
   else
     echo "${!ENGINE_GPU_MEM_VAR:-0.8}"
   fi

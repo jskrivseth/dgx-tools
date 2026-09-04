@@ -88,6 +88,49 @@ or `dflash` for explicit experiments. `VLLM_SPECULATIVE_MODEL` overrides the
 derived DSpark/DFlash draft model ID, and `VLLM_SPECULATIVE_TOKENS` controls
 the draft length.
 
+The setup model picker also includes these NVIDIA DGX Spark model recipes:
+
+| Model | Hugging Face ID | Best for |
+|---|---|---|
+| Nemotron 3 Nano Omni 30B A3B Reasoning | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` | Multimodal reasoning, tool use, and long-context chat |
+| Qwen3.6 35B A3B NVFP4 | `nvidia/Qwen3.6-35B-A3B-NVFP4` | Agentic workloads, tool calling, and reasoning |
+| Llama 3.3 70B Instruct FP4 | `nvidia/Llama-3.3-70B-Instruct-FP4` | General-purpose chat, reasoning, and code generation (TensorRT-LLM optimized) |
+
+On DGX Spark, prefer the NVFP4 checkpoints. BF16 is retained as a
+Nemotron Omni compatibility fallback, but it uses roughly 62 GB versus
+roughly 21 GB for the official NVFP4 checkpoint and leaves substantially
+less unified memory available for KV cache and the operating system. The
+Qwen3.6 NVFP4 entry uses NVIDIA's Spark recipe automatically: FP8 KV cache,
+FlashInfer attention, Marlin MoE, bounded chunked prefill, async scheduling,
+prefix caching, fast safetensors loading, and three-token MTP speculative
+decoding. Set `VLLM_SPECULATIVE_MODE=none` for a baseline.
+
+The Qwen3.6 recipe's `0.4` GPU-memory fraction is intentional: NVIDIA
+pairs it with the full 262K context on Spark's shared 128 GB memory pool.
+dgxt now raises this automatically for longer contexts: `0.6` above 256K
+through 512K, and `0.7` above 512K. It is a KV-cache/concurrency budget,
+not a direct single-request speed setting. An explicit `VLLM_GPU_MEM`
+environment or config value always overrides these tiers; monitor unified
+memory pressure before trying `0.8` or higher.
+
+The Llama 3.3 FP4 checkpoint is included for model selection, but NVIDIA's
+model card documents TensorRT-LLM as its optimized inference engine rather
+than a DGX Spark vLLM recipe. Treat it as an experimental vLLM choice until
+the TensorRT-LLM engine is enabled in dgxt; use TensorRT-LLM directly for
+the NVIDIA-validated Llama deployment path.
+
+The Omni recipe defaults to a 131072-token context on Spark even though the
+checkpoint supports up to 256K; pass `--max-context 256k` only when the
+additional unified-memory allocation is appropriate for your workload.
+
+They can also be selected directly without running setup:
+
+```bash
+dgxt start nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+dgxt start nvidia/Qwen3.6-35B-A3B-NVFP4
+dgxt start nvidia/Llama-3.3-70B-Instruct-FP4
+```
+
 Once running, the server speaks the OpenAI-compatible API:
 
 ```bash
@@ -133,7 +176,7 @@ VLLM_MODEL=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
 VLLM_MAX_MODEL_LEN=1m
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000
-VLLM_GPU_MEM=0.85
+VLLM_GPU_MEM=0.85                       # omit for model/context auto-tuning
 VLLM_SPECULATIVE_MODE=dspark
 VLLM_SPECULATIVE_TOKENS=3
 HF_TOKEN=hf_...

@@ -22,6 +22,16 @@ ENGINE_HF_APPS_FILTER="vllm"
 # check in dgxt for how this gets triggered.
 ENGINE_SUPPORTS_ROPE_SCALING="1"
 
+# NVIDIA's Spark recipe starts the multimodal Omni checkpoint at 131072
+# tokens even though its published native ceiling is 256K. The lower
+# allocation leaves unified memory for media processing and KV cache.
+resolve_default_context_override() {
+  case "$1" in
+    *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*) echo "131072" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Config file env var names this engine reads/writes (kept as the original
 # VLLM_* names for continuity with existing ~/.vllmrc-based configs).
 ENGINE_MODEL_VAR="VLLM_MODEL"
@@ -68,17 +78,29 @@ ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 # to tune the strength.
 ENGINE_REPETITION_PENALTY_VAR="VLLM_REPETITION_PENALTY"
 
-# Nemotron's official DGX Spark recipe uses 0.85. Keep an explicit
-# VLLM_GPU_MEM override authoritative, but select that value automatically
-# for Nemotron when no setting exists.
+# Nemotron's official DGX Spark recipe uses 0.85. NVIDIA's Qwen3.6 Spark
+# recipe uses 0.4 at its native 256K context; increase that automatically
+# for longer contexts because they need a larger KV-cache budget. Keep an
+# explicit VLLM_GPU_MEM override authoritative.
 resolve_gpu_memory() {
   local model="$1"
+  local max_len="${2:-}"
   if [[ -n "${VLLM_GPU_MEM:-}" ]]; then
     echo "$VLLM_GPU_MEM"
     return
   fi
   case "$model" in
     *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*) echo "0.85" ;;
+    nvidia/Qwen3.6-35B-A3B-NVFP4)
+      if [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 524288 )); then
+        echo "0.7"
+      elif [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
+        echo "0.6"
+      else
+        # NVIDIA's published Spark setting for the native 262K recipe.
+        echo "0.4"
+      fi
+      ;;
     *) echo "0.8" ;;
   esac
 }
@@ -89,8 +111,11 @@ resolve_gpu_memory() {
 ENGINE_DEFAULT_MODEL="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 ENGINE_RECOMMENDED_MODELS=(
   "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4|~22GB|recommended DGX Spark default -- 1M context and DSpark speculative decoding"
+  "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4|~21GB|multimodal reasoning, tool use, and long-context chat; DGX Spark NVFP4 recipe"
+  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|NVIDIA's recommended agent-ready model for tool calling and reasoning"
+  "nvidia/Llama-3.3-70B-Instruct-FP4|~50GB|general-purpose instruction following and coding; official optimized path is TensorRT-LLM"
+  "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16|~62GB|Nemotron 3 Omni compatibility fallback; use NVFP4 on DGX Spark"
   "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|best perf on this hardware -- verified ~71.5 tok/s single-stream via FlashInfer B12X MoE backend, same accuracy as the plain NVFP4 checkpoint"
-  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|previous default; auto MoE backend, safe fallback if the Fast checkpoint ever regresses"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
@@ -168,7 +193,11 @@ resolve_tool_call_parser() {
   # temporary metadata/network failure cannot silently disable or misparse
   # tool calls for this known model.
   case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*) echo "qwen3_coder"; return ;;
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*|*Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*)
+      echo "qwen3_coder"
+      return
+      ;;
+    *Llama-3.3-70B*|*llama-3.3-70b*) echo "llama3_json"; return ;;
   esac
 
   arch=$(resolve_model_architecture "$model")
@@ -220,7 +249,10 @@ resolve_reasoning_parser() {
   # Match its model ID before the HF lookup for the same offline-safe
   # behavior as resolve_tool_call_parser().
   case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*) echo "nemotron_v3"; return ;;
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*|*Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*)
+      echo "nemotron_v3"
+      return
+      ;;
   esac
 
   arch=$(resolve_model_architecture "$model")
@@ -426,8 +458,12 @@ engine_run_container() {
       [[ -n "$moe_backend" ]] || moe_backend="marlin"
       moe_backend_args=(--moe-backend "$moe_backend")
       nemotron_args=(
+        --trust-remote-code
         --mamba-backend flashinfer
         --mamba-cache-mode align
+        --mamba-ssm-cache-dtype float16
+        --enable-mamba-cache-stochastic-rounding
+        --mamba-cache-philox-rounds 5
         --kv-cache-dtype fp8
         --enable-prefix-caching
         --max-num-batched-tokens 32768
@@ -489,6 +525,57 @@ engine_run_container() {
     qwen38_serve_command=("${QWEN38_SERVE_COMMAND[@]}")
   fi
 
+  # NVIDIA's Qwen3.6 DGX Spark recipe (vLLM >= 0.28) uses the NVFP4
+  # checkpoint with FP8 KV cache, Marlin MoE kernels, bounded batching,
+  # async scheduling, prefix caching, and a three-token MTP draft. Keep
+  # these defaults specific to NVIDIA's checkpoint: the community "-Fast"
+  # checkpoint above has a different, verified FlashInfer B12X profile.
+  local qwen36_args=() qwen36_speculative_args=()
+  case "$model" in
+    nvidia/Qwen3.6-35B-A3B-NVFP4)
+      qwen36_args=(
+        --host 0.0.0.0
+        --tensor-parallel-size 1
+        --trust-remote-code
+        --quantization modelopt
+        --kv-cache-dtype fp8
+        --attention-backend flashinfer
+        --max-num-seqs 4
+        --max-num-batched-tokens 8192
+        --enable-chunked-prefill
+        --async-scheduling
+        --enable-prefix-caching
+        --load-format fastsafetensors
+      )
+      if [[ -n "$moe_backend" ]]; then
+        qwen36_args+=(--moe-backend "$moe_backend")
+      else
+        qwen36_args+=(--moe-backend marlin)
+      fi
+
+      local qwen36_speculative_mode="${VLLM_SPECULATIVE_MODE:-mtp}"
+      local qwen36_speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-3}"
+      case "${qwen36_speculative_mode,,}" in
+        none)
+          ;;
+        mtp)
+          if [[ ! "$qwen36_speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+            return 1
+          fi
+          qwen36_speculative_args=(
+            --speculative-config
+            "{\"method\":\"mtp\",\"num_speculative_tokens\":${qwen36_speculative_tokens},\"moe_backend\":\"triton\"}"
+          )
+          ;;
+        *)
+          echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp or none for Qwen3.6." >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+
   # DSpark is NVIDIA's recommended speculative decoder for Nemotron on
   # DGX Spark and low-concurrency interactive workloads. Keep alternatives
   # opt-in because their draft checkpoints and compatibility vary by vLLM
@@ -508,6 +595,7 @@ engine_run_container() {
           fi
           local dspark_model="${VLLM_SPECULATIVE_MODEL:-${model}-DSpark}"
           speculative_args=(
+            --speculative_config.method dspark
             --speculative_config.num_speculative_tokens "$speculative_tokens"
             --speculative_config.model "$dspark_model"
           )
@@ -545,7 +633,28 @@ engine_run_container() {
   # Model profiles contribute only their matching environment, flags, and
   # mounts; the container invocation below remains engine-generic.
   local model_env=("${gptoss_env[@]}" "${qwen38_env[@]}" "${fast_env[@]}")
-  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}")
+  local omni_args=()
+  case "$model" in
+    *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*)
+      # NVIDIA's vLLM Spark recipe for the Omni checkpoint. The multimodal
+      # limits prevent unbounded media batching; video pruning and explicit
+      # frame sampling reduce prefill cost without changing text behavior.
+      omni_args=(
+        --host 0.0.0.0
+        --tensor-parallel-size 1
+        --trust-remote-code
+        --video-pruning-rate 0.5
+        --max-num-seqs 8
+        --allowed-local-media-path /
+        --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}'
+        --limit-mm-per-prompt '{"video":1,"image":1,"audio":1}'
+        --enable-prefix-caching
+        --max-num-batched-tokens 32768
+        --kv-cache-dtype fp8
+      )
+      ;;
+  esac
+  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}" "${qwen36_args[@]}" "${omni_args[@]}")
   local model_volumes=("${gptoss_vol[@]}")
 
   docker run -d \
@@ -569,6 +678,7 @@ engine_run_container() {
     "${moe_backend_args[@]}" \
     "${model_args[@]}" \
     "${speculative_args[@]}" \
+    "${qwen36_speculative_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \
