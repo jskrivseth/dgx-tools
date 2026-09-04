@@ -101,9 +101,13 @@ Nemotron Omni compatibility fallback, but it uses roughly 62 GB versus
 roughly 21 GB for the official NVFP4 checkpoint and leaves substantially
 less unified memory available for KV cache and the operating system. The
 Qwen3.6 NVFP4 entry uses NVIDIA's Spark recipe automatically: FP8 KV cache,
-FlashInfer attention, Marlin MoE, bounded chunked prefill, async scheduling,
-prefix caching, fast safetensors loading, and three-token MTP speculative
-decoding. Set `VLLM_SPECULATIVE_MODE=none` for a baseline.
+FlashInfer attention, modelopt's Marlin-compatible quantized MoE path,
+bounded chunked prefill, async scheduling, prefix caching, fast safetensors
+loading, and three-token MTP speculative decoding. dgxt also enables vLLM's
+experimental Marlin atomic-add path for the small expert shapes; set
+`VLLM_MARLIN_USE_ATOMIC_ADD=0` to opt out. Set
+`VLLM_SPECULATIVE_MODE=none` for a baseline. The target backend is left on
+auto so the unquantized MTP predictor can select a compatible backend.
 
 The `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` variant uses its DGX Spark-specific
 `CUTE_DSL_ARCH=sm_121a` and `flashinfer_b12x` MoE path, plus FP8 KV cache,
@@ -115,11 +119,11 @@ baseline. Its automatic GPU-memory setting is `0.8` through native 256K
 context and `0.7` for longer YaRN contexts; explicit `VLLM_GPU_MEM` still
 overrides this heuristic.
 
-The Qwen3.6 recipe's `0.4` GPU-memory fraction is intentional: NVIDIA
-pairs it with the full 262K context on Spark's shared 128 GB memory pool.
-dgxt now raises this automatically for longer contexts: `0.6` above 256K
-through 512K, and `0.7` above 512K. It is a KV-cache/concurrency budget,
-not a direct single-request speed setting. An explicit `VLLM_GPU_MEM`
+The NVIDIA Qwen3.6 recipe's original `0.4` GPU-memory fraction is too low
+for the current vLLM nightly's CUDA-graph footprint on Spark: it can fail
+to reserve enough KV cache for one 256K request. dgxt therefore uses `0.6`
+through 512K and `0.7` above 512K. It is a KV-cache/concurrency budget, not
+a direct single-request speed setting. An explicit `VLLM_GPU_MEM`
 environment or config value always overrides these tiers; monitor unified
 memory pressure before trying `0.8` or higher.
 

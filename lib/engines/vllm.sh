@@ -79,9 +79,11 @@ ENGINE_MOE_BACKEND_VAR="VLLM_MOE_BACKEND"
 ENGINE_REPETITION_PENALTY_VAR="VLLM_REPETITION_PENALTY"
 
 # Nemotron's official DGX Spark recipe uses 0.85. NVIDIA's Qwen3.6 Spark
-# recipe uses 0.4 at its native 256K context; increase that automatically
-# for longer contexts because they need a larger KV-cache budget. Keep an
-# explicit VLLM_GPU_MEM override authoritative.
+# recipe's 0.4 setting is too low for the current nightly's CUDA-graph
+# footprint on DGX Spark: it cannot reserve enough KV cache for one 256K
+# request. Use the validated 0.6 Spark setting at native context and
+# increase that automatically for longer contexts. Keep an explicit
+# VLLM_GPU_MEM override authoritative.
 resolve_gpu_memory() {
   local model="$1"
   local max_len="${2:-}"
@@ -97,8 +99,9 @@ resolve_gpu_memory() {
       elif [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
         echo "0.6"
       else
-        # NVIDIA's published Spark setting for the native 262K recipe.
-        echo "0.4"
+        # The current nightly needs 0.6 to leave enough KV cache after
+        # CUDA-graph capture; 0.4 fails before serving a 256K request.
+        echo "0.6"
       fi
       ;;
     unsloth/Qwen3.6-35B-A3B-NVFP4-Fast)
@@ -539,9 +542,13 @@ engine_run_container() {
   # async scheduling, prefix caching, and a three-token MTP draft. Keep
   # these defaults specific to NVIDIA's checkpoint: the community "-Fast"
   # checkpoint above has a different, verified FlashInfer B12X profile.
-  local qwen36_args=() qwen36_speculative_args=() qwen36_fast_speculative_args=()
+  local qwen36_env=() qwen36_args=() qwen36_speculative_args=() qwen36_fast_speculative_args=()
   case "$model" in
     nvidia/Qwen3.6-35B-A3B-NVFP4)
+      # vLLM recommends this experimental Marlin path for the model's small
+      # expert shapes on DGX Spark. Keep it scoped to the NVIDIA checkpoint;
+      # VLLM_MARLIN_USE_ATOMIC_ADD=0 remains an explicit opt-out.
+      qwen36_env=(-e "VLLM_MARLIN_USE_ATOMIC_ADD=${VLLM_MARLIN_USE_ATOMIC_ADD:-1}")
       qwen36_args=(
         --host 0.0.0.0
         --tensor-parallel-size 1
@@ -556,11 +563,12 @@ engine_run_container() {
         --enable-prefix-caching
         --load-format fastsafetensors
       )
-      if [[ -n "$moe_backend" ]]; then
-        qwen36_args+=(--moe-backend "$moe_backend")
-      else
-        qwen36_args+=(--moe-backend marlin)
-      fi
+      # Do not force Marlin here. The modelopt quantization config selects
+      # Marlin for the quantized target automatically, while an explicit
+      # global backend is also inherited by the unquantized MTP predictor in
+      # some vLLM builds. Leaving the target on auto lets each model choose a
+      # compatible backend; VLLM_MOE_BACKEND remains an explicit override.
+      [[ -n "$moe_backend" ]] && qwen36_args+=(--moe-backend "$moe_backend")
 
       local qwen36_speculative_mode="${VLLM_SPECULATIVE_MODE:-mtp}"
       local qwen36_speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-3}"
@@ -689,7 +697,7 @@ engine_run_container() {
 
   # Model profiles contribute only their matching environment, flags, and
   # mounts; the container invocation below remains engine-generic.
-  local model_env=("${gptoss_env[@]}" "${qwen38_env[@]}" "${fast_env[@]}")
+  local model_env=("${gptoss_env[@]}" "${qwen38_env[@]}" "${qwen36_env[@]}" "${fast_env[@]}")
   local omni_args=()
   case "$model" in
     *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*)
