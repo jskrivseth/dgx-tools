@@ -177,10 +177,16 @@ VLLM_MAX_MODEL_LEN=1m
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000
 VLLM_GPU_MEM=0.85                       # omit for model/context auto-tuning
+# Model-specific: dspark for Lightning, mtp for Qwen3.6
 VLLM_SPECULATIVE_MODE=dspark
 VLLM_SPECULATIVE_TOKENS=3
 HF_TOKEN=hf_...
 ```
+
+`VLLM_SPECULATIVE_MODE` is interpreted for the selected model. If a
+configuration carried over from Lightning sets `dspark` or `dflash` while
+Qwen3.6 is selected, dgxt warns and falls back to Qwen3.6's supported MTP
+mode. Use `VLLM_SPECULATIVE_MODE=none` to disable speculative decoding.
 
 NIM uses a different set of keys — see the
 [appendix](#full-config-file-examples) for its example and the

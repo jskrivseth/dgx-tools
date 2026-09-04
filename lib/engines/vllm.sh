@@ -555,6 +555,11 @@ engine_run_container() {
 
       local qwen36_speculative_mode="${VLLM_SPECULATIVE_MODE:-mtp}"
       local qwen36_speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-3}"
+      if [[ "${qwen36_speculative_mode,,}" == "dspark" || "${qwen36_speculative_mode,,}" == "dflash" ]]; then
+        echo "WARNING: VLLM_SPECULATIVE_MODE=$qwen36_speculative_mode is not supported for Qwen3.6; using mtp." >&2
+        echo "  Set VLLM_SPECULATIVE_MODE=none to disable speculative decoding." >&2
+        qwen36_speculative_mode="mtp"
+      fi
       case "${qwen36_speculative_mode,,}" in
         none)
           ;;
