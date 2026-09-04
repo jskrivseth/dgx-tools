@@ -105,6 +105,16 @@ FlashInfer attention, Marlin MoE, bounded chunked prefill, async scheduling,
 prefix caching, fast safetensors loading, and three-token MTP speculative
 decoding. Set `VLLM_SPECULATIVE_MODE=none` for a baseline.
 
+The `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` variant uses its DGX Spark-specific
+`CUTE_DSL_ARCH=sm_121a` and `flashinfer_b12x` MoE path, plus FP8 KV cache,
+bounded batching, chunked prefill, async scheduling, prefix caching, and its
+built-in two-token MTP draft. It does not receive `--quantization modelopt`;
+Unsloth's compressed-tensors checkpoint is auto-detected. Set
+`VLLM_SPECULATIVE_MODE=none` when comparing against a non-speculative
+baseline. Its automatic GPU-memory setting is `0.8` through native 256K
+context and `0.7` for longer YaRN contexts; explicit `VLLM_GPU_MEM` still
+overrides this heuristic.
+
 The Qwen3.6 recipe's `0.4` GPU-memory fraction is intentional: NVIDIA
 pairs it with the full 262K context on Spark's shared 128 GB memory pool.
 dgxt now raises this automatically for longer contexts: `0.6` above 256K

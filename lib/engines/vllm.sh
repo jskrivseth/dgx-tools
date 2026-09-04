@@ -101,6 +101,15 @@ resolve_gpu_memory() {
         echo "0.4"
       fi
       ;;
+    unsloth/Qwen3.6-35B-A3B-NVFP4-Fast)
+      if [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
+        # No Fast-specific Spark fraction is published; reserve more
+        # unified memory for the KV cache when leaving the native context.
+        echo "0.7"
+      else
+        echo "0.8"
+      fi
+      ;;
     *) echo "0.8" ;;
   esac
 }
@@ -530,7 +539,7 @@ engine_run_container() {
   # async scheduling, prefix caching, and a three-token MTP draft. Keep
   # these defaults specific to NVIDIA's checkpoint: the community "-Fast"
   # checkpoint above has a different, verified FlashInfer B12X profile.
-  local qwen36_args=() qwen36_speculative_args=()
+  local qwen36_args=() qwen36_speculative_args=() qwen36_fast_speculative_args=()
   case "$model" in
     nvidia/Qwen3.6-35B-A3B-NVFP4)
       qwen36_args=(
@@ -575,6 +584,49 @@ engine_run_container() {
           ;;
         *)
           echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp or none for Qwen3.6." >&2
+          return 1
+          ;;
+      esac
+      ;;
+    unsloth/Qwen3.6-35B-A3B-NVFP4-Fast)
+      # Unsloth's Fast checkpoint is compressed-tensors/NVFP4 and
+      # auto-detects its quantization. Keep its native B12X MoE backend
+      # selection above, and add the compatible low-concurrency serving
+      # profile used for the same Qwen3.6 hybrid architecture.
+      qwen36_args=(
+        --host 0.0.0.0
+        --tensor-parallel-size 1
+        --trust-remote-code
+        --kv-cache-dtype fp8
+        --max-num-seqs 4
+        --max-num-batched-tokens 8192
+        --enable-chunked-prefill
+        --async-scheduling
+        --enable-prefix-caching
+      )
+
+      local qwen36_fast_speculative_mode="${VLLM_SPECULATIVE_MODE:-mtp}"
+      local qwen36_fast_speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-2}"
+      if [[ "${qwen36_fast_speculative_mode,,}" == "dspark" || "${qwen36_fast_speculative_mode,,}" == "dflash" ]]; then
+        echo "WARNING: VLLM_SPECULATIVE_MODE=$qwen36_fast_speculative_mode is not supported for Qwen3.6-Fast; using mtp." >&2
+        echo "  Set VLLM_SPECULATIVE_MODE=none to disable speculative decoding." >&2
+        qwen36_fast_speculative_mode="mtp"
+      fi
+      case "${qwen36_fast_speculative_mode,,}" in
+        none)
+          ;;
+        mtp)
+          if [[ ! "$qwen36_fast_speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+            return 1
+          fi
+          qwen36_fast_speculative_args=(
+            --speculative-config
+            "{\"method\":\"mtp\",\"num_speculative_tokens\":${qwen36_fast_speculative_tokens}}"
+          )
+          ;;
+        *)
+          echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp or none for Qwen3.6-Fast." >&2
           return 1
           ;;
       esac
@@ -684,6 +736,7 @@ engine_run_container() {
     "${model_args[@]}" \
     "${speculative_args[@]}" \
     "${qwen36_speculative_args[@]}" \
+    "${qwen36_fast_speculative_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \
