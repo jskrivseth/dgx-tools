@@ -39,6 +39,7 @@ ENGINE_MAX_LEN_VAR="VLLM_MAX_MODEL_LEN"
 ENGINE_API_KEY_VAR="VLLM_API_KEY"
 ENGINE_PORT_VAR="VLLM_PORT"
 ENGINE_GPU_MEM_VAR="VLLM_GPU_MEM"
+ENGINE_SERVED_MODEL_NAME_VAR="VLLM_SERVED_MODEL_NAME"
 ENGINE_TOOL_CALL_PARSER_VAR="VLLM_TOOL_CALL_PARSER"
 ENGINE_REASONING_PARSER_VAR="VLLM_REASONING_PARSER"
 # MoE backend for NVFP4 models on Blackwell (SM120). vLLM's own "auto"
@@ -113,6 +114,17 @@ resolve_gpu_memory() {
         echo "0.8"
       fi
       ;;
+    ornith-ai/Ornith-1.5-35B-A3B-NVFP4)
+      if [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
+        echo "0.7"
+      else
+        # Community GB10 measurements report stable 256K serving around
+        # 0.85 for the official mixed ModelOpt checkpoint. Leave headroom
+        # for the optional MTP predictor when extending beyond native
+        # context.
+        echo "0.85"
+      fi
+      ;;
     *) echo "0.8" ;;
   esac
 }
@@ -128,6 +140,7 @@ ENGINE_RECOMMENDED_MODELS=(
   "nvidia/Llama-3.3-70B-Instruct-FP4|~50GB|general-purpose instruction following and coding; official optimized path is TensorRT-LLM"
   "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16|~62GB|Nemotron 3 Omni compatibility fallback; use NVFP4 on DGX Spark"
   "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|best perf on this hardware -- verified ~71.5 tok/s single-stream via FlashInfer B12X MoE backend, same accuracy as the plain NVFP4 checkpoint"
+  "ornith-ai/Ornith-1.5-35B-A3B-NVFP4|~22GB|coding and agentic reasoning specialist; DGX Spark NVFP4 profile with native 256K context"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
@@ -359,6 +372,14 @@ configure_qwen38_profile() {
 # reasoning_parser.
 engine_run_container() {
   local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5" tool_call_parser="${6:-}" reasoning_parser="${7:-}"
+  local served_model_name_args=()
+  if [[ -n "${VLLM_SERVED_MODEL_NAME:-}" ]]; then
+    if [[ "${VLLM_SERVED_MODEL_NAME}" =~ [[:space:]] ]]; then
+      echo "ERROR: VLLM_SERVED_MODEL_NAME must be a single model alias without whitespace." >&2
+      return 1
+    fi
+    served_model_name_args=(--served-model-name "$VLLM_SERVED_MODEL_NAME" "$model")
+  fi
   local tool_args=()
   if [[ -n "$tool_call_parser" ]]; then
     tool_args=(--enable-auto-tool-choice --tool-call-parser "$tool_call_parser")
@@ -543,6 +564,7 @@ engine_run_container() {
   # these defaults specific to NVIDIA's checkpoint: the community "-Fast"
   # checkpoint above has a different, verified FlashInfer B12X profile.
   local qwen36_env=() qwen36_args=() qwen36_speculative_args=() qwen36_fast_speculative_args=()
+  local ornith_args=() ornith_speculative_args=()
   case "$model" in
     nvidia/Qwen3.6-35B-A3B-NVFP4)
       # vLLM recommends this experimental Marlin path for the model's small
@@ -639,6 +661,46 @@ engine_run_container() {
           ;;
       esac
       ;;
+    ornith-ai/Ornith-1.5-35B-A3B-NVFP4)
+      # Ornith is a Qwen3.5 MoE-compatible ModelOpt NVFP4 checkpoint.
+      # Keep the target MoE backend on auto so mixed-precision layers and
+      # the unquantized MTP predictor can choose compatible kernels.
+      ornith_args=(
+        --host 0.0.0.0
+        --tensor-parallel-size 1
+        --trust-remote-code
+        --quantization modelopt
+        --kv-cache-dtype fp8
+        --max-num-seqs 16
+        --max-num-batched-tokens 4096
+        --enable-chunked-prefill
+        --enable-prefix-caching
+      )
+
+      # The official card does not enable speculative decoding. Start with
+      # that stable baseline; the checkpoint contains one MTP layer and
+      # supports opt-in one/two-token experiments on compatible vLLM builds.
+      local ornith_speculative_mode="${VLLM_SPECULATIVE_MODE:-none}"
+      local ornith_speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-1}"
+      case "${ornith_speculative_mode,,}" in
+        none)
+          ;;
+        mtp)
+          if [[ ! "$ornith_speculative_tokens" =~ ^[1-2]$ ]]; then
+            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be 1 or 2 for Ornith MTP." >&2
+            return 1
+          fi
+          ornith_speculative_args=(
+            --speculative-config
+            "{\"method\":\"mtp\",\"num_speculative_tokens\":${ornith_speculative_tokens},\"moe_backend\":\"triton\"}"
+          )
+          ;;
+        *)
+          echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp or none for Ornith." >&2
+          return 1
+          ;;
+      esac
+      ;;
   esac
 
   # DSpark is NVIDIA's recommended speculative decoder for Nemotron on
@@ -719,7 +781,7 @@ engine_run_container() {
       )
       ;;
   esac
-  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}" "${qwen36_args[@]}" "${omni_args[@]}")
+  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}" "${qwen36_args[@]}" "${ornith_args[@]}" "${omni_args[@]}")
   local model_volumes=("${gptoss_vol[@]}")
 
   docker run -d \
@@ -738,6 +800,7 @@ engine_run_container() {
     "${model_volumes[@]}" \
     "$ENGINE_IMAGE" \
     "${qwen38_serve_command[@]}" \
+    "${served_model_name_args[@]}" \
     "${max_len_args[@]}" \
     "${repetition_penalty_args[@]}" \
     "${moe_backend_args[@]}" \
@@ -745,6 +808,7 @@ engine_run_container() {
     "${speculative_args[@]}" \
     "${qwen36_speculative_args[@]}" \
     "${qwen36_fast_speculative_args[@]}" \
+    "${ornith_speculative_args[@]}" \
     --gpu-memory-utilization "$gpu_mem" \
     --api-key "$api_key" \
     "${tool_args[@]}" \

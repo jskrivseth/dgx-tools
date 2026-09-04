@@ -94,6 +94,7 @@ The setup model picker also includes these NVIDIA DGX Spark model recipes:
 |---|---|---|
 | Nemotron 3 Nano Omni 30B A3B Reasoning | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` | Multimodal reasoning, tool use, and long-context chat |
 | Qwen3.6 35B A3B NVFP4 | `nvidia/Qwen3.6-35B-A3B-NVFP4` | Agentic workloads, tool calling, and reasoning |
+| Ornith 1.5 35B A3B NVFP4 | `ornith-ai/Ornith-1.5-35B-A3B-NVFP4` | Coding and agentic reasoning; Spark-tuned NVFP4 alternative |
 | Llama 3.3 70B Instruct FP4 | `nvidia/Llama-3.3-70B-Instruct-FP4` | General-purpose chat, reasoning, and code generation (TensorRT-LLM optimized) |
 
 On DGX Spark, prefer the NVFP4 checkpoints. BF16 is retained as a
@@ -119,6 +120,32 @@ baseline. Its automatic GPU-memory setting is `0.8` through native 256K
 context and `0.7` for longer YaRN contexts; explicit `VLLM_GPU_MEM` still
 overrides this heuristic.
 
+`ornith-ai/Ornith-1.5-35B-A3B-NVFP4` is a Qwen3.5-MoE-compatible, ModelOpt
+mixed-precision NVFP4 checkpoint with one integrated MTP layer and native
+262K context. dgxt uses a conservative Spark profile: TP=1, FP8 KV cache,
+16 sequences, 4096 batched tokens, chunked prefill, prefix caching, and
+automatic MoE backend selection. Its default GPU-memory fraction is `0.85`
+through native context and `0.7` for longer YaRN contexts, based on community
+GB10 measurements. The official model card does not enable speculation, so
+Ornith starts with MTP disabled; test it explicitly with
+`VLLM_SPECULATIVE_MODE=mtp` and one token before trying two. Use
+`VLLM_SPECULATIVE_MODE=none` for the clean baseline.
+
+The official Ornith vLLM command targets two 80 GB GPUs and is not a
+DGX-Spark recipe. The Spark profile uses the official NVFP4 checkpoint rather
+than the BF16 model. Tool and reasoning parsers remain Qwen-compatible
+(`qwen3_xml` and `qwen3`); if a future checkpoint revision changes its output
+format, override them with `VLLM_TOOL_CALL_PARSER` or
+`VLLM_REASONING_PARSER`.
+
+When `dgxt setup` selects a supported recommended model, it presents a
+predefined context menu matched to that model's native limit and practical
+Spark range. Ornith offers 128K, 256K, 384K, 512K, 768K, or 1M, plus disabled,
+MTP-1, or MTP-2 speculation. Other models receive context-only menus: Lightning
+offers up to 1M, Omni up to 256K, Llama/GPT-OSS up to 128K, and the smaller
+Qwen models receive menus capped at their native limits. Extended context still
+requires the normal YaRN confirmation before startup.
+
 The NVIDIA Qwen3.6 recipe's original `0.4` GPU-memory fraction is too low
 for the current vLLM nightly's CUDA-graph footprint on Spark: it can fail
 to reserve enough KV cache for one 256K request. dgxt therefore uses `0.6`
@@ -142,6 +169,7 @@ They can also be selected directly without running setup:
 ```bash
 dgxt start nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
 dgxt start nvidia/Qwen3.6-35B-A3B-NVFP4
+dgxt start ornith-ai/Ornith-1.5-35B-A3B-NVFP4
 dgxt start nvidia/Llama-3.3-70B-Instruct-FP4
 ```
 
@@ -191,6 +219,7 @@ VLLM_MAX_MODEL_LEN=1m
 VLLM_API_KEY=<random, generated for you>
 VLLM_PORT=8000
 VLLM_GPU_MEM=0.85                       # omit for model/context auto-tuning
+VLLM_SERVED_MODEL_NAME=gpt-5.4-nano     # optional client-facing alias
 # Model-specific: dspark for Lightning, mtp for Qwen3.6
 VLLM_SPECULATIVE_MODE=dspark
 VLLM_SPECULATIVE_TOKENS=3
@@ -201,6 +230,12 @@ HF_TOKEN=hf_...
 configuration carried over from Lightning sets `dspark` or `dflash` while
 Qwen3.6 is selected, dgxt warns and falls back to Qwen3.6's supported MTP
 mode. Use `VLLM_SPECULATIVE_MODE=none` to disable speculative decoding.
+
+vLLM validates the `model` field in OpenAI-compatible requests. If a client
+uses a fixed name such as `gpt-5.4-nano` while dgxt serves a different model,
+set `VLLM_SERVED_MODEL_NAME=gpt-5.4-nano`; dgxt will pass that name as an API
+alias while also accepting the actual running model ID. vLLM has no wildcard
+alias that accepts arbitrary unknown model names.
 
 NIM uses a different set of keys — see the
 [appendix](#full-config-file-examples) for its example and the
