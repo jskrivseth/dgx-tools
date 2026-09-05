@@ -76,6 +76,14 @@ checkpoint's native MTP head. `VLLM_SPECULATIVE_MODEL` and
 `VLLM_MTP_TOKENS` remains accepted as a backwards-compatible alias for the MTP
 token count.
 
+For `unsloth/Qwen3.8-27B-NVFP4`, dgxt applies the same FlashInfer/atomic-add
+workarounds and bounded-batching profile as RadixArk's checkpoint (it is the
+same `qwen3_5` dense hybrid-attention VLM). Unlike RadixArk, Unsloth's NVFP4 is
+compressed-tensors (Dynamic V3.0) and auto-detects its quantization, so no
+`--quantization` flag is set, and there is no DSpark draft -- speculation
+defaults to the checkpoint's own native MTP head. Selecting that model is
+therefore sufficient; set `VLLM_SPECULATIVE_MODE=none` for a baseline.
+
 For `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, dgxt automatically
 applies NVIDIA's GB10 backend recipe: FlashInfer for Mamba, aligned Mamba
 caches, FP8 KV cache, prefix caching, Marlin for MoE, and DSpark speculative
@@ -361,7 +369,8 @@ does not silently apply YaRN to models whose native context is shorter than
 1M, because static YaRN can reduce short-context quality. The forum
 measurements used about `0.60` GPU memory utilization for 1M; the default
 `0.8` leaves more KV capacity but less unified-memory headroom, so lower
-`VLLM_GPU_MEM` if other workloads share the machine.
+`VLLM_GPU_MEM` if other workloads share the machine. The same 1M YaRN path
+applies to `unsloth/Qwen3.8-27B-NVFP4` as well.
 
 The vLLM engine uses the ARM64 `vllm/vllm-openai:nightly` image because the
 stable v0.28.0 image misroutes RadixArk's `DSparkDraftModel` architecture.

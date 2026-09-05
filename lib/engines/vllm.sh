@@ -144,6 +144,7 @@ ENGINE_RECOMMENDED_MODELS=(
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
+  "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -313,6 +314,11 @@ configure_qwen38_profile() {
   local speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-${VLLM_MTP_TOKENS:-}}"
 
   QWEN38_ENV_ARGS=(-e "VLLM_MARLIN_USE_ATOMIC_ADD=1")
+  # Unsloth's checkpoint is compressed-tensors/NVFP4 (Dynamic V3.0) and
+  # auto-detects its quantization, so we intentionally omit --quantization
+  # here (unlike the NVIDIA modelopt path). The FlashInfer + bounded-batching
+  # profile below matches the same qwen3_5 dense hybrid-attention architecture
+  # shared with RadixArk's checkpoint.
   QWEN38_ARGS=(
     --attention-backend FLASHINFER
     --max-num-seqs 4
@@ -326,7 +332,14 @@ configure_qwen38_profile() {
 
   case "$model" in
     RadixArk/Qwen3.8-27B-NVFP4|radixark/Qwen3.8-27B-NVFP4)
+      # RadixArk ships a matching DSpark sparse draft, so speculative
+      # decoding defaults to the dspark method with that draft model.
       default_speculative_mode="dspark"
+      ;;
+    unsloth/Qwen3.8-27B-NVFP4|unsloth/qwen3.8-27b-nvfp4)
+      # Unsloth's NVFP4 has no third-party DSpark draft; its trained
+      # predictor is MTP, so speculation stays on the model's own MTP head.
+      default_speculative_mode="mtp"
       ;;
   esac
   speculative_mode="${VLLM_SPECULATIVE_MODE:-$default_speculative_mode}"
