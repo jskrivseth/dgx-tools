@@ -125,6 +125,17 @@ resolve_gpu_memory() {
         echo "0.85"
       fi
       ;;
+    *Qwen3*Next*)
+      # The NVFP4-GB10 quant is ~46GB; 0.85 leaves generous KV
+      # headroom at native 256K (cheap 4-KV-head cache). Drop the fraction
+      # when stretching past native context so the larger KV pool still
+      # reserves.
+      if [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
+        echo "0.7"
+      else
+        echo "0.85"
+      fi
+      ;;
     *) echo "0.8" ;;
   esac
 }
@@ -143,8 +154,9 @@ ENGINE_RECOMMENDED_MODELS=(
   "ornith-ai/Ornith-1.5-35B-A3B-NVFP4|~22GB|coding and agentic reasoning specialist; DGX Spark NVFP4 profile with native 256K context"
   "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
   "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
+  "ucbye/Qwen3-Coder-Next-NVFP4-GB10|~46GB|pinned, ungated 80B/3B hybrid Gated-DeltaNet coder; FlashInfer+Marlin NVFP4 recipe, native 256K context"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
-  "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft"
+  "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft; measured ~20 tok/s single-stream with MTP"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -241,8 +253,16 @@ resolve_tool_call_parser() {
     # pattern to also match the Moe variant; that path is qwen3_xml and
     # already verified working.
     *Qwen3_5ForConditionalGeneration*) echo "qwen3_coder" ;;
+    *Qwen3Next*|*Qwen3-Next*) echo "qwen3_coder" ;;
     *Qwen3Coder*|*Qwen3_5Moe*|*Qwen3Moe*|*Qwen3*) echo "qwen3_xml" ;;
     *Qwen2*) echo "hermes" ;;
+    # Qwen3-Coder-Next / Qwen3-Next (Qwen3NextForCausalLM) emit the
+    # Qwen3-coder tool-call format; match before the fallthrough so tool
+    # calling stays enabled for these. Their architecture hits none of the
+    # cases below, so without this the Qwen3-Coder-Next checkpoint and
+    # nvidia's official Qwen3-Next checkpoints would silently ship with
+    # tool calling disabled.
+    *DeepseekV4*|*DeepSeekV4*) echo "qwen3_coder" ;;
     *Llama4*) echo "llama4_pythonic" ;;
     *Llama*) echo "llama3_json" ;;
     *Mistral*|*Mixtral*) echo "mistral" ;;
@@ -373,8 +393,24 @@ configure_qwen38_profile() {
         "{\"method\":\"dspark\",\"model\":\"${dspark_model}\",\"num_speculative_tokens\":${speculative_tokens}}"
       )
       ;;
+    dflash)
+      # z-lab/incoai's DFlash2 block-diffusion draft, trained against
+      # Qwen/Qwen3.8-27B (quant-agnostic). Nightly vLLM implements the
+      # "dflash" method; z-lab's H200 evals put it ahead of both the
+      # built-in MTP and RadixArk's DSpark on acceptance length.
+      speculative_tokens="${speculative_tokens:-7}"
+      if [[ ! "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
+        return 1
+      fi
+      local dflash_model="${VLLM_SPECULATIVE_MODEL:-incoai/Qwen3.8-27B-DFlash2}"
+      QWEN38_SPECULATIVE_ARGS=(
+        --speculative-config
+        "{\"method\":\"dflash\",\"model\":\"${dflash_model}\",\"num_speculative_tokens\":${speculative_tokens}}"
+      )
+      ;;
     *)
-      echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp, dspark, or none for Qwen3.8." >&2
+      echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp, dspark, dflash, or none for Qwen3.8." >&2
       return 1
       ;;
   esac
@@ -578,6 +614,7 @@ engine_run_container() {
   # checkpoint above has a different, verified FlashInfer B12X profile.
   local qwen36_env=() qwen36_args=() qwen36_speculative_args=() qwen36_fast_speculative_args=()
   local ornith_args=() ornith_speculative_args=()
+  local codernext_env=() codernext_args=()
   case "$model" in
     nvidia/Qwen3.6-35B-A3B-NVFP4)
       # vLLM recommends this experimental Marlin path for the model's small
@@ -714,6 +751,33 @@ engine_run_container() {
           ;;
       esac
       ;;
+    *Qwen3*Next*)
+      # The NVFP4-GB10 quant and its ucbye mirror use the same
+      # 80B/3B hybrid Gated-DeltaNet
+      # coder (Qwen3NextForCausalLM). FlashInfer handles attention; the
+      # FP4 MoE GEMMs are routed to Marlin via env vars rather than
+      # --moe-backend, which we leave on auto so mixed-precision layers
+      # keep their per-layer kernel fallback (cf. ENGINE_MOE_BACKEND_VAR).
+      # No MTP/DSpark draft ships with this quant, so speculative decoding
+      # defaults to none -- opt in with the separate -DSpark checkpoint.
+      codernext_env=(
+        -e "VLLM_USE_FLASHINFER_MOE_FP4=0"
+        -e "VLLM_NVFP4_GEMM_BACKEND=marlin"
+        -e "VLLM_MARLIN_USE_ATOMIC_ADD=1"
+        -e "VLLM_TEST_FORCE_FP8_MARLIN=1"
+      )
+      codernext_args=(
+        --host 0.0.0.0
+        --tensor-parallel-size 1
+        --trust-remote-code
+        --kv-cache-dtype fp8
+        --attention-backend flashinfer
+        --enable-prefix-caching
+        --enable-chunked-prefill
+        --max-num-batched-tokens 8192
+        --max-num-seqs 8
+      )
+      ;;
   esac
 
   # DSpark is NVIDIA's recommended speculative decoder for Nemotron on
@@ -772,7 +836,7 @@ engine_run_container() {
 
   # Model profiles contribute only their matching environment, flags, and
   # mounts; the container invocation below remains engine-generic.
-  local model_env=("${gptoss_env[@]}" "${qwen38_env[@]}" "${qwen36_env[@]}" "${fast_env[@]}")
+  local model_env=("${gptoss_env[@]}" "${qwen38_env[@]}" "${qwen36_env[@]}" "${fast_env[@]}" "${codernext_env[@]}")
   local omni_args=()
   case "$model" in
     *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*)
@@ -794,7 +858,7 @@ engine_run_container() {
       )
       ;;
   esac
-  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}" "${qwen36_args[@]}" "${ornith_args[@]}" "${omni_args[@]}")
+  local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}" "${qwen36_args[@]}" "${ornith_args[@]}" "${omni_args[@]}" "${codernext_args[@]}")
   local model_volumes=("${gptoss_vol[@]}")
 
   docker run -d \

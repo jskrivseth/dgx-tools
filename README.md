@@ -103,6 +103,7 @@ The setup model picker also includes these NVIDIA DGX Spark model recipes:
 | Nemotron 3 Nano Omni 30B A3B Reasoning | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` | Multimodal reasoning, tool use, and long-context chat |
 | Qwen3.6 35B A3B NVFP4 | `nvidia/Qwen3.6-35B-A3B-NVFP4` | Agentic workloads, tool calling, and reasoning |
 | Ornith 1.5 35B A3B NVFP4 | `ornith-ai/Ornith-1.5-35B-A3B-NVFP4` | Coding and agentic reasoning; Spark-tuned NVFP4 alternative |
+| Qwen3-Coder-Next NVFP4 GB10 | `ucbye/Qwen3-Coder-Next-NVFP4-GB10` | Coding and agentic workloads; pinned ungated 80B/3B hybrid model |
 | Llama 3.3 70B Instruct FP4 | `nvidia/Llama-3.3-70B-Instruct-FP4` | General-purpose chat, reasoning, and code generation (TensorRT-LLM optimized) |
 
 On DGX Spark, prefer the NVFP4 checkpoints. BF16 is retained as a
@@ -146,6 +147,14 @@ than the BF16 model. Tool and reasoning parsers remain Qwen-compatible
 format, override them with `VLLM_TOOL_CALL_PARSER` or
 `VLLM_REASONING_PARSER`.
 
+`ucbye/Qwen3-Coder-Next-NVFP4-GB10` is a pinned, ungated mirror of the
+NVFP4 checkpoint. It uses the Qwen3-Next Spark profile automatically:
+FlashInfer attention, Marlin NVFP4 GEMMs, FP8 KV cache, chunked prefill,
+prefix caching, and eight serving sequences. The checkpoint has 80B total
+parameters with roughly 3B active per token and a native 256K context. It
+does not ship with a draft checkpoint, so speculative decoding is disabled
+by default; use `VLLM_SPECULATIVE_MODE=none` explicitly for a baseline.
+
 When `dgxt setup` selects a supported recommended model, it presents a
 predefined context menu matched to that model's native limit and practical
 Spark range. Ornith offers 128K, 256K, 384K, 512K, 768K, or 1M, plus disabled,
@@ -177,6 +186,7 @@ They can also be selected directly without running setup:
 ```bash
 dgxt start nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
 dgxt start nvidia/Qwen3.6-35B-A3B-NVFP4
+dgxt start ucbye/Qwen3-Coder-Next-NVFP4-GB10
 dgxt start ornith-ai/Ornith-1.5-35B-A3B-NVFP4
 dgxt start nvidia/Llama-3.3-70B-Instruct-FP4
 ```

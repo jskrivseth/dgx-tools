@@ -580,7 +580,7 @@ configure_setup_model_options() {
       context_values=(65536 131072 262144)
       context_labels=("64K" "128K, default" "256K")
       ;;
-    *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*|*Ornith-1.5*|*ornith-1.5*|*Qwen3-Next*)
+    *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*|*Ornith-1.5*|*ornith-1.5*|*Qwen3*Next*|*qwen3*next*)
       context_default=262144
       context_values=(131072 262144 393216 524288 786432 1048576)
       context_labels=("128K" "256K, native/recommended" "384K, YaRN" "512K, YaRN" "768K, YaRN" "1M, YaRN")
