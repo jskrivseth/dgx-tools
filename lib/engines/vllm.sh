@@ -755,16 +755,13 @@ engine_run_container() {
       # The NVFP4-GB10 quant and its ucbye mirror use the same
       # 80B/3B hybrid Gated-DeltaNet
       # coder (Qwen3NextForCausalLM). FlashInfer handles attention; the
-      # FP4 MoE GEMMs are routed to Marlin via env vars rather than
-      # --moe-backend, which we leave on auto so mixed-precision layers
-      # keep their per-layer kernel fallback (cf. ENGINE_MOE_BACKEND_VAR).
+      # FP4 linear and MoE GEMMs are explicitly routed to Marlin. The
+      # current vLLM nightly uses CLI backend flags; the older
+      # VLLM_NVFP4_GEMM_BACKEND environment variable is deprecated.
       # No MTP/DSpark draft ships with this quant, so speculative decoding
       # defaults to none -- opt in with the separate -DSpark checkpoint.
       codernext_env=(
-        -e "VLLM_USE_FLASHINFER_MOE_FP4=0"
-        -e "VLLM_NVFP4_GEMM_BACKEND=marlin"
         -e "VLLM_MARLIN_USE_ATOMIC_ADD=1"
-        -e "VLLM_TEST_FORCE_FP8_MARLIN=1"
       )
       codernext_args=(
         --host 0.0.0.0
@@ -772,6 +769,8 @@ engine_run_container() {
         --trust-remote-code
         --kv-cache-dtype fp8
         --attention-backend flashinfer
+        --linear-backend marlin
+        --moe-backend marlin
         --enable-prefix-caching
         --enable-chunked-prefill
         --max-num-batched-tokens 8192
