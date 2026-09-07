@@ -301,6 +301,13 @@ resolve_reasoning_parser() {
       ;;
   esac
 
+  # Qwen3-Next's published chat template has no <think> delimiters and this
+  # checkpoint emits ordinary answers directly. Applying the generic qwen3
+  # parser would therefore classify the whole answer as reasoning content.
+  case "$model" in
+    *Qwen3*Next*|*qwen3*next*) echo ""; return ;;
+  esac
+
   arch=$(resolve_model_architecture "$model")
   if [[ -z "$arch" ]]; then
     echo "$ENGINE_DEFAULT_REASONING_PARSER"
