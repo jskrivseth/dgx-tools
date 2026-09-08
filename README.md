@@ -5,8 +5,8 @@ similar single-GPU ARM64 NVIDIA workstation) as fast as possible — no
 native builds, no dependency wrangling beyond Docker and the official
 HuggingFace CLI.
 
-Currently implemented: **vLLM** and **NIM**. Placeholders exist for
-TensorRT-LLM, SGLang, llama.cpp, and Ollama (see [Engines](#engines)).
+Currently implemented: **vLLM**, **SGLang**, and **NIM**. Placeholders exist
+for TensorRT-LLM, llama.cpp, and Ollama (see [Engines](#engines)).
 
 dgxt does **not** reimplement anything the `hf` CLI already does well —
 searching, downloading, cache management, and auth are all thin
@@ -272,9 +272,22 @@ auto-generated).
 | `vllm` | ready |
 | `nim` | ready |
 | `tensorrt-llm` | planned |
-| `sglang` | planned |
+| `sglang` | ready |
 | `llama-cpp` | planned |
 | `ollama` | planned |
+
+The SGLang Qwen3.8-27B profile defaults to DFlash2 speculative decoding:
+
+```ini
+SGLANG_SPECULATIVE_MODE=dflash2
+SGLANG_SPECULATIVE_MODEL=incoai/Qwen3.8-27B-DFlash2
+SGLANG_SPECULATIVE_TOKENS=8
+SGLANG_MAX_RUNNING_REQUESTS=8
+```
+
+Use `SGLANG_SPECULATIVE_MODE=dspark` and
+`SGLANG_SPECULATIVE_MODEL=RadixArk/Qwen3.8-27B-DSpark` as the fallback draft,
+or set the mode to `none` for a non-speculative baseline.
 
 Adding a new engine means writing one small file in `lib/engines/` — a
 handful of variables (container name, config-file variable names,

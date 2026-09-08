@@ -9,8 +9,7 @@
 #   https://huggingface.co/docs/huggingface_hub/en/guides/cli
 #
 # Engines are pluggable (lib/engines/*.sh). Currently implemented: vLLM,
-# NIM. Placeholders exist for TensorRT-LLM, SGLang, and Ollama — select
-# one with `dgxt engine <name>` once it's implemented.
+# SGLang, and NIM. Placeholders exist for TensorRT-LLM and Ollama.
 #
 # Quick start:
 #   dgxt setup                              Guided: pick engine, prereqs, hf auth, pick a model, start
@@ -94,6 +93,8 @@ load_engine() {
   ENGINE_API_KEY_VAR="_DGXT_UNSET" ENGINE_PORT_VAR="_DGXT_UNSET"
   ENGINE_GPU_MEM_VAR="_DGXT_UNSET" ENGINE_TOOL_CALL_PARSER_VAR="_DGXT_UNSET"
   ENGINE_REASONING_PARSER_VAR="_DGXT_UNSET"
+  ENGINE_SPECULATIVE_MODE_VAR="_DGXT_UNSET" ENGINE_SPECULATIVE_MODEL_VAR="_DGXT_UNSET"
+  ENGINE_SPECULATIVE_TOKENS_VAR="_DGXT_UNSET"
   ENGINE_SERVED_MODEL_NAME_VAR="_DGXT_UNSET"
   ENGINE_DEFAULT_MODEL=""
   ENGINE_DEFAULT_TOOL_CALL_PARSER=""
@@ -103,6 +104,10 @@ load_engine() {
   # auto-generated; ENGINE_API_KEY_HINT is the guidance shown when it's unset.
   ENGINE_API_KEY_EXTERNAL="0"
   ENGINE_API_KEY_HINT=""
+  # Sibling engines may explicitly opt out of the safety prompt when they
+  # intentionally use a separate port/container (for example, comparing
+  # SGLang with an already-running vLLM service).
+  ENGINE_ALLOW_OTHER_ENGINES_RUNNING="0"
   # Whether this engine can actually extend a model past its native
   # context via RoPE scaling (see cmd_start's native-max-context check) --
   # only vLLM supports this today. Engines that can't (e.g. NIM, whose
@@ -189,7 +194,9 @@ cmd_start() {
     return
   fi
 
-  check_other_engines_running
+  if [[ "${ENGINE_ALLOW_OTHER_ENGINES_RUNNING:-0}" != "1" ]]; then
+    check_other_engines_running
+  fi
 
   # A previous failed `docker run` (e.g. a port conflict) can leave behind
   # a stopped/never-started container with this name, which then makes
@@ -286,7 +293,7 @@ cmd_start() {
     fi
   fi
 
-  local port="${!ENGINE_PORT_VAR:-8000}"
+  local port="${!ENGINE_PORT_VAR:-${ENGINE_DEFAULT_PORT:-8000}}"
   local gpu_mem=""
   if engine_defines_var "$ENGINE_GPU_MEM_VAR"; then
     gpu_mem=$(resolve_gpu_memory_for_engine "$model" "$max_len")
@@ -371,9 +378,9 @@ cmd_config() {
     echo "  ('$CURRENT_ENGINE' is a placeholder — no engine-specific settings yet)"
   else
     local cfg_model="${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}"
+    local cfg_max_len=""
     printf "  %-20s %s\n" "$ENGINE_MODEL_VAR:" "$cfg_model"
     if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
-      local cfg_max_len
       cfg_max_len=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
       cfg_max_len="${cfg_max_len:-$(resolve_default_context "$cfg_model")}"
       printf "  %-20s %s\n" "$ENGINE_MAX_LEN_VAR:" "${cfg_max_len:-<unset; engine default applies>}"
@@ -383,7 +390,7 @@ cmd_config() {
     else
       printf "  %-20s %s\n" "$ENGINE_API_KEY_VAR:" "${!ENGINE_API_KEY_VAR:-<not set; a random key is generated at start>}"
     fi
-    printf "  %-20s %s\n" "$ENGINE_PORT_VAR:" "${!ENGINE_PORT_VAR:-8000}"
+    printf "  %-20s %s\n" "$ENGINE_PORT_VAR:" "${!ENGINE_PORT_VAR:-${ENGINE_DEFAULT_PORT:-8000}}"
     if engine_defines_var "$ENGINE_GPU_MEM_VAR"; then
       printf "  %-20s %s\n" "$ENGINE_GPU_MEM_VAR:" "$(resolve_gpu_memory_for_engine "$cfg_model" "$cfg_max_len")"
     fi
@@ -394,6 +401,11 @@ cmd_config() {
     if engine_defines_var "$ENGINE_REASONING_PARSER_VAR"; then
       local cfg_reasoning_parser="${!ENGINE_REASONING_PARSER_VAR:-$(resolve_reasoning_parser_for_engine "${!ENGINE_MODEL_VAR:-$ENGINE_DEFAULT_MODEL}")}"
       printf "  %-20s %s\n" "$ENGINE_REASONING_PARSER_VAR:" "${cfg_reasoning_parser:-disabled}"
+    fi
+    if engine_defines_var "$ENGINE_SPECULATIVE_MODE_VAR"; then
+      printf "  %-20s %s\n" "$ENGINE_SPECULATIVE_MODE_VAR:" "${!ENGINE_SPECULATIVE_MODE_VAR:-${ENGINE_DEFAULT_SPECULATIVE_MODE:-none}}"
+      printf "  %-20s %s\n" "$ENGINE_SPECULATIVE_MODEL_VAR:" "${!ENGINE_SPECULATIVE_MODEL_VAR:-<engine default>}"
+      printf "  %-20s %s\n" "$ENGINE_SPECULATIVE_TOKENS_VAR:" "${!ENGINE_SPECULATIVE_TOKENS_VAR:-${ENGINE_DEFAULT_SPECULATIVE_TOKENS:-<engine default>}}"
     fi
     if engine_defines_var "$ENGINE_SERVED_MODEL_NAME_VAR"; then
       printf "  %-20s %s\n" "$ENGINE_SERVED_MODEL_NAME_VAR:" "${!ENGINE_SERVED_MODEL_NAME_VAR:-<running model ID>}"
@@ -438,7 +450,7 @@ cmd_save() {
   else
     api_key=$(resolve_api_key "$ENGINE_API_KEY_VAR")
   fi
-  local port="${!ENGINE_PORT_VAR:-8000}"
+  local port="${!ENGINE_PORT_VAR:-${ENGINE_DEFAULT_PORT:-8000}}"
   local gpu_mem=""
   local gpu_mem_explicit=0
   if engine_defines_var "$ENGINE_GPU_MEM_VAR"; then
