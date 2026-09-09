@@ -598,8 +598,14 @@ configure_setup_model_options() {
       ;;
     *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*|*Ornith-1.5*|*ornith-1.5*|*Qwen3*Next*|*qwen3*next*)
       context_default=262144
-      context_values=(131072 262144 393216 524288 786432 1048576)
-      context_labels=("128K" "256K, native/recommended" "384K, YaRN" "512K, YaRN" "768K, YaRN" "1M, YaRN")
+      context_values=(131072 262144)
+      context_labels=("128K" "256K, native/recommended")
+      # YaRN context extension is only available on engines that support
+      # RoPE scaling (vLLM). SGLang and others cap at the native max.
+      if [[ "${ENGINE_SUPPORTS_ROPE_SCALING:-0}" == "1" ]]; then
+        context_values+=(393216 524288 786432 1048576)
+        context_labels+=("384K, YaRN" "512K, YaRN" "768K, YaRN" "1M, YaRN")
+      fi
       ;;
     *Llama-3.3-70B*|*llama-3.3-70b*|*gpt-oss*|*GptOss*|*GPTOss*)
       context_default=131072
@@ -653,8 +659,8 @@ configure_setup_model_options() {
 
   echo ""
   echo "    Speculative decoding:"
-  local current_mode="${VLLM_SPECULATIVE_MODE:-none}"
-  local current_tokens="${VLLM_SPECULATIVE_TOKENS:-}"
+  local current_mode="${!ENGINE_SPECULATIVE_MODE_VAR:-none}"
+  local current_tokens="${!ENGINE_SPECULATIVE_TOKENS_VAR:-}"
   if [[ "${current_mode,,}" == "mtp" && "$current_tokens" =~ ^[12]$ ]]; then
     :
   else
@@ -683,11 +689,11 @@ configure_setup_model_options() {
       echo "    Invalid MTP choice; keeping ${current_mode}${current_tokens:+-$current_tokens}."
       ;;
   esac
-  save_config_value VLLM_SPECULATIVE_MODE "$current_mode"
+  save_config_value "$ENGINE_SPECULATIVE_MODE_VAR" "$current_mode"
   if [[ "$current_mode" == "mtp" ]]; then
-    save_config_value VLLM_SPECULATIVE_TOKENS "$current_tokens"
+    save_config_value "$ENGINE_SPECULATIVE_TOKENS_VAR" "$current_tokens"
   else
-    save_config_value VLLM_SPECULATIVE_TOKENS ""
+    save_config_value "$ENGINE_SPECULATIVE_TOKENS_VAR" ""
   fi
   echo "    Selected speculation: ${current_mode}${current_tokens:+-$current_tokens}."
 }
@@ -843,7 +849,7 @@ cmd_setup() {
     fi
   fi
   save_config_value "$ENGINE_MODEL_VAR" "$model"
-  if [[ "$CURRENT_ENGINE" == "vllm" ]]; then
+  if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
     configure_setup_model_options "$model"
   fi
 

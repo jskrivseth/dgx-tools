@@ -74,7 +74,9 @@ load_config() {
 }
 
 # Set KEY=VALUE in $DEFAULT_CONFIG_FILE, creating the file and replacing any
-# existing line for KEY.
+# existing line for KEY. Also updates the in-memory environment variable so
+# that subsequent reads in the same script execution (e.g. cmd_start after
+# cmd_setup) see the new value immediately, without requiring a restart.
 save_config_value() {
   local key="$1" value="$2"
   touch "$DEFAULT_CONFIG_FILE"
@@ -83,6 +85,9 @@ save_config_value() {
   else
     echo "${key}=${value}" >> "$DEFAULT_CONFIG_FILE"
   fi
+  # Sync the in-memory env var with the file so the rest of this script
+  # execution sees the updated value (load_config only runs once at startup).
+  export "$key"="$value"
 }
 
 # ---- Prerequisites --------------------------------------------------------

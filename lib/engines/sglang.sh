@@ -27,6 +27,7 @@ ENGINE_HF_APPS_FILTER="sglang"
 ENGINE_ALLOW_OTHER_ENGINES_RUNNING="1"
 
 ENGINE_MODEL_VAR="SGLANG_MODEL"
+ENGINE_MAX_LEN_VAR="SGLANG_MAX_MODEL_LEN"
 ENGINE_API_KEY_VAR="SGLANG_API_KEY"
 ENGINE_PORT_VAR="SGLANG_PORT"
 ENGINE_GPU_MEM_VAR="SGLANG_GPU_MEM"
@@ -135,6 +136,19 @@ resolve_default_speculative_model() {
   esac
 }
 
+# Model-specific default speculative token count. MTP heads predict a small
+# number of tokens (Qwen3.6's vLLM recipe uses 3); DFlash block drafting
+# uses 8.
+resolve_default_speculative_tokens() {
+  local model="$1"
+  case "$model" in
+    *Qwen3.6*|*qwen3.6*)
+      echo "3" ;;
+    *)
+      echo "$ENGINE_DEFAULT_SPECULATIVE_TOKENS" ;;
+  esac
+}
+
 # Model-specific default max running requests. Qwen3-Coder-Next's ~43GB
 # checkpoint leaves less unified memory for KV cache, so 4 concurrent
 # requests is the validated safe default.
@@ -176,7 +190,9 @@ engine_run_container() {
   local default_spec_mode
   default_spec_mode=$(resolve_default_speculative_mode "$model")
   local speculative_mode="${SGLANG_SPECULATIVE_MODE:-$default_spec_mode}"
-  local speculative_tokens="${SGLANG_SPECULATIVE_TOKENS:-$ENGINE_DEFAULT_SPECULATIVE_TOKENS}"
+  local default_spec_tokens
+  default_spec_tokens=$(resolve_default_speculative_tokens "$model")
+  local speculative_tokens="${SGLANG_SPECULATIVE_TOKENS:-$default_spec_tokens}"
   local default_spec_model
   default_spec_model=$(resolve_default_speculative_model "$model")
   local default_max_running
@@ -228,7 +244,7 @@ engine_run_container() {
         --speculative-algorithm EAGLE
         --speculative-num-steps 3
         --speculative-eagle-topk 1
-        --speculative-num-draft-tokens 4
+        --speculative-num-draft-tokens "$speculative_tokens"
         --enable-linear-replayssm-spec
       )
       ;;
@@ -253,6 +269,13 @@ engine_run_container() {
       ;;
   esac
 
+  # Context length: only pass when explicitly set (SGLang auto-detects the
+  # model's native max otherwise).
+  local context_args=()
+  if [[ -n "$_max_len" && "$_max_len" != "auto" ]]; then
+    context_args=(--context-length "$_max_len")
+  fi
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -275,6 +298,7 @@ engine_run_container() {
       --max-running-requests "$max_running_requests" \
       --attention-backend flashinfer \
       --chunked-prefill-size 2048 \
+      "${context_args[@]}" \
       "${arch_args[@]}" \
       "${speculative_args[@]}" \
       --api-key "$api_key" \
