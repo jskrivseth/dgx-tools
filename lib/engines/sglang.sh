@@ -162,6 +162,28 @@ resolve_max_running_requests() {
   esac
 }
 
+# Check whether an explicitly-set speculative draft model is compatible with
+# the target model. Returns 0 (compatible) if the draft model name contains
+# the target model's family name, or if the draft is empty (MTP has no
+# separate draft). Returns 1 (incompatible) otherwise. This catches the
+# common mistake of switching models without clearing SGLANG_SPECULATIVE_MODEL,
+# which would otherwise load a draft trained for a different architecture.
+spec_model_compatible() {
+  local target="$1" draft="$2"
+  [[ -z "$draft" ]] && return 0
+  case "$target" in
+    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+      [[ "$draft" == *Nemotron* || "$draft" == *nemotron* ]] && return 0 ;;
+    *Qwen3-Coder-Next*|*qwen3-coder-next*)
+      [[ "$draft" == *Qwen3-Coder-Next* || "$draft" == *qwen3-coder-next* ]] && return 0 ;;
+    *Qwen3.8*|*qwen3.8*)
+      [[ "$draft" == *Qwen3.8* || "$draft" == *qwen3.8* ]] && return 0 ;;
+    *Qwen3.6*|*qwen3.6*)
+      [[ "$draft" == *Qwen3.6* || "$draft" == *qwen3.6* ]] && return 0 ;;
+  esac
+  return 1
+}
+
 # Model-specific reasoning parser (called by resolve_reasoning_parser_for_engine
 # in common.sh when the engine defines this function).
 resolve_reasoning_parser() {
@@ -195,6 +217,20 @@ engine_run_container() {
   local speculative_tokens="${SGLANG_SPECULATIVE_TOKENS:-$default_spec_tokens}"
   local default_spec_model
   default_spec_model=$(resolve_default_speculative_model "$model")
+
+  # Guard: if the user explicitly set SGLANG_SPECULATIVE_MODEL but it doesn't
+  # match the target model's family, warn and fall back to the model-specific
+  # defaults (both mode and draft model). This catches the common mistake of
+  # switching models without clearing the previous model's speculative settings.
+  if [[ -n "${SGLANG_SPECULATIVE_MODEL:-}" ]]; then
+    if ! spec_model_compatible "$model" "$SGLANG_SPECULATIVE_MODEL"; then
+      echo "WARNING: SGLANG_SPECULATIVE_MODEL ($SGLANG_SPECULATIVE_MODEL) doesn't match $model."
+      echo "  Falling back to model defaults: mode=$default_spec_mode, draft=${default_spec_model:-<none>}"
+      echo "  (clear SGLANG_SPECULATIVE_MODEL and SGLANG_SPECULATIVE_MODE from ~/.dgxtrc to fix permanently)"
+      SGLANG_SPECULATIVE_MODEL=""
+      speculative_mode="$default_spec_mode"
+    fi
+  fi
   local default_max_running
   default_max_running=$(resolve_max_running_requests "$model")
   local max_running_requests="${SGLANG_MAX_RUNNING_REQUESTS:-$default_max_running}"
