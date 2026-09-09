@@ -276,7 +276,11 @@ auto-generated).
 | `llama-cpp` | planned |
 | `ollama` | planned |
 
-The SGLang Qwen3.8-27B profile defaults to DFlash2 speculative decoding:
+The SGLang engine supports four DGX Spark recipes, each with its own dev
+image, speculative-decoding default, and architecture flags:
+
+**Qwen3.8-27B NVFP4** (`RadixArk/Qwen3.8-27B-NVFP4`) — dense
+hybrid-attention VLM. Defaults to DFlash2 speculative decoding:
 
 ```ini
 SGLANG_SPECULATIVE_MODE=dflash2
@@ -288,6 +292,72 @@ SGLANG_MAX_RUNNING_REQUESTS=8
 Use `SGLANG_SPECULATIVE_MODE=dspark` and
 `SGLANG_SPECULATIVE_MODEL=RadixArk/Qwen3.8-27B-DSpark` as the fallback draft,
 or set the mode to `none` for a non-speculative baseline.
+
+**Nemotron 3.5 Lightning 30B A3B NVFP4**
+(`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`) — hybrid
+Mamba-Transformer MoE with 3B active parameters and a 1M-token context.
+Defaults to DSpark speculative decoding (the best speculator for this model
+on DGX Spark) with the matching DSpark draft checkpoint, FlashInfer Mamba
+backend, and the `0.85` GPU-memory fraction from NVIDIA's GB10 recipe:
+
+```ini
+SGLANG_SPECULATIVE_MODE=dspark
+SGLANG_SPECULATIVE_MODEL=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
+SGLANG_MAX_RUNNING_REQUESTS=8
+```
+
+Set `SGLANG_SPECULATIVE_MODE=none` for a non-speculative baseline, or `mtp`
+to use the checkpoint's native MTP head.
+
+**Qwen3.6 35B A3B NVFP4** (`nvidia/Qwen3.6-35B-A3B-NVFP4`) — MoE with 3B
+active parameters. Defaults to MTP speculative decoding (the MTP head is
+baked into the checkpoint, so no separate draft model is needed) and a
+`0.60` GPU-memory fraction:
+
+```ini
+SGLANG_SPECULATIVE_MODE=mtp
+SGLANG_MAX_RUNNING_REQUESTS=8
+```
+
+Set `SGLANG_SPECULATIVE_MODE=none` for a non-speculative baseline.
+
+**Qwen3-Coder-Next NVFP4 GB10** (`saricles/Qwen3-Coder-Next-NVFP4-GB10`) —
+80B/3B hybrid Gated-DeltaNet coder. Defaults to DFlash speculative decoding
+with the `z-lab/Qwen3-Coder-Next-DFlash` draft, `0.55` GPU-memory fraction,
+and 4 max running requests. DeepGEMM is disabled automatically (scale-format
+mismatch on Blackwell). Note: this model requires SGLang patches for
+compressed-tensors NVFP4 loading (see the NVIDIA forum HOW-TO for the two
+one-line patches to `qwen3_next.py` and `expert_location.py`).
+
+**Qwen3.6 35B A3B NVFP4** (`nvidia/Qwen3.6-35B-A3B-NVFP4`) — MoE with 3B
+active parameters. Defaults to MTP speculative decoding (the MTP head is
+baked into the checkpoint, so no separate draft model is needed) and a
+`0.60` GPU-memory fraction:
+
+```ini
+SGLANG_SPECULATIVE_MODE=mtp
+SGLANG_MAX_RUNNING_REQUESTS=8
+```
+
+Set `SGLANG_SPECULATIVE_MODE=none` for a non-speculative baseline.
+
+**Qwen3-Coder-Next NVFP4 GB10** (`saricles/Qwen3-Coder-Next-NVFP4-GB10`) —
+80B/3B hybrid Gated-DeltaNet coder. Defaults to DFlash speculative decoding
+with the `z-lab/Qwen3-Coder-Next-DFlash` draft, `0.55` GPU-memory fraction,
+and 4 max running requests. DeepGEMM is disabled automatically (scale-format
+mismatch on Blackwell). CUDA graphs are disabled for code-generation
+workloads (they help long generations but hurt short ones).
+
+```ini
+SGLANG_SPECULATIVE_MODE=dflash
+SGLANG_SPECULATIVE_MODEL=z-lab/Qwen3-Coder-Next-DFlash
+SGLANG_MAX_RUNNING_REQUESTS=4
+```
+
+> **Note:** This model requires two SGLang patches for compressed-tensors
+> NVFP4 loading (`qwen3_next.py` and `expert_location.py`). See the
+> [NVIDIA forum HOW-TO](https://forums.developer.nvidia.com/t/how-to-run-qwen3-coder-next-on-spark/359571)
+> for the exact patch instructions.
 
 Adding a new engine means writing one small file in `lib/engines/` — a
 handful of variables (container name, config-file variable names,

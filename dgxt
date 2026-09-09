@@ -327,7 +327,11 @@ cmd_start() {
   echo "  API key:        ${api_key:0:8}..."
   engine_defines_var "$ENGINE_TOOL_CALL_PARSER_VAR" && echo "  Tool calling:   ${tool_call_parser:-disabled}"
   engine_defines_var "$ENGINE_REASONING_PARSER_VAR" && echo "  Reasoning:      ${reasoning_parser:-disabled}"
-  echo "  Image:          ${ENGINE_IMAGE:-n/a}"
+  local display_image="${ENGINE_IMAGE:-n/a}"
+  if declare -f resolve_engine_image >/dev/null 2>&1; then
+    display_image=$(resolve_engine_image "$model")
+  fi
+  echo "  Image:          ${display_image}"
   echo ""
   if [[ "$api_key_was_unset" -eq 1 ]]; then
     # Persist immediately — otherwise a later `dgxt save`/`setup`/`start`
