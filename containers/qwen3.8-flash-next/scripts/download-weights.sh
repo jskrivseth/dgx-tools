@@ -9,7 +9,7 @@ set -euo pipefail
 
 MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
 REVISION="${REVISION:-7b719225242aacd3dbd3f9407468c2ee9a9d2594}"
-IMAGE="${IMAGE:-dgxt/qwen38-flash-next:latest}" # or any image containing the `hf` CLI
+IMAGE="${IMAGE:-dgxt/qwen38-flash-next-v029:latest}" # or any image containing the `hf` CLI
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 mkdir -p "$HF_CACHE"
 
@@ -21,4 +21,4 @@ docker run --rm --name qwen38-dl \
   -v "$HF_CACHE:/hf" --entrypoint bash "$IMAGE" \
   -c "hf download '$MODEL' --revision '$REVISION' --max-workers 8"
 
-echo ">> done. Verify with:  scripts/serve.sh"
+echo ">> done. Start with:  dgxt start qwen38-flash-next-v029"

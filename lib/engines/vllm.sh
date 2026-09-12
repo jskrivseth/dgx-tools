@@ -20,40 +20,52 @@ ENGINE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 normalize_model_alias() {
   case "$1" in
-    qwen38-flash-next|qwen3.8-flash-next|Qwen3.8-Flash-Next)
-      echo "RadixArk/Qwen3.8-Flash-Next-NVFP4" ;;
+    qwen38-flash-next|qwen3.8-flash-next|Qwen3.8-Flash-Next|RadixArk/Qwen3.8-Flash-Next-NVFP4|qwen38-flash-next-v029)
+      echo "qwen38-flash-next-v029" ;;
     *)
       echo "$1" ;;
   esac
 }
 
+is_flash_next_model() {
+  case "$1" in
+    qwen38-flash-next-v029) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+flash_next_checkpoint_model() {
+  echo "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+}
+
 # Per-model image resolution. Most models use the default vLLM nightly image,
 # but Flash-Next requires the repo-owned image with PLE mmap offload patches
 # (the 51 GB table must be mmapped from NVMe to fit in 128 GB). Override with
-# VLLM_FLASH_NEXT_IMAGE if you built or tagged a different image.
+# VLLM_FLASH_NEXT_V029_IMAGE if you built or tagged a different image.
 resolve_engine_image() {
   local model="$1"
   case "$model" in
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
-      echo "${VLLM_FLASH_NEXT_IMAGE:-dgxt/qwen38-flash-next:latest}" ;;
+    qwen38-flash-next-v029)
+      echo "${VLLM_FLASH_NEXT_V029_IMAGE:-dgxt/qwen38-flash-next-v029:latest}" ;;
     *)
       echo "$ENGINE_IMAGE" ;;
   esac
 }
 
-ensure_flash_next_image() {
+ensure_flash_next_v029_image() {
   local image="$1"
   if docker image inspect "$image" >/dev/null 2>&1; then
     return 0
   fi
   if [[ "${VLLM_FLASH_NEXT_AUTO_BUILD:-1}" == "0" ]]; then
-    echo "ERROR: Flash-Next image '$image' is not available locally." >&2
-    echo "  Build it with: $ENGINE_ROOT/containers/qwen3.8-flash-next/scripts/build-image.sh" >&2
+    echo "ERROR: Flash-Next v0.29 image '$image' is not available locally." >&2
+    echo "  Build it with: $ENGINE_ROOT/containers/qwen3.8-flash-next/scripts/build-v029-image.sh" >&2
     return 1
   fi
   IMAGE="$image" \
-    "$ENGINE_ROOT/containers/qwen3.8-flash-next/scripts/build-image.sh"
+    "$ENGINE_ROOT/containers/qwen3.8-flash-next/scripts/build-v029-image.sh"
 }
+
 # vLLM can genuinely extend a model past its native context via YaRN RoPE
 # scaling (unlike NIM's precompiled engines, which have no such knob) --
 # see engine_run_container's rope_args and cmd_start's native-max-context
@@ -81,7 +93,7 @@ normalize_context_for_engine() {
     echo "WARNING: capping Qwen3.6-Fast at its verified DGX Spark context of 262144 tokens." >&2
     echo "  The current vLLM nightly can fail during GDN warmup above native context." >&2
     echo "262144"
-  elif [[ "$model" == *Qwen3.8-Flash-Next* || "$model" == *qwen3.8-flash-next* ]] &&
+  elif is_flash_next_model "$model" &&
        [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
     # Qwen's published Flash-Next extension uses fixed 4x YaRN from the
     # native 262,144-token window, including the 500K prefix-cache profile.
@@ -100,7 +112,7 @@ normalize_context_for_engine() {
 resolve_default_context_override() {
   case "$1" in
     *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*) echo "131072" ;;
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*) echo "500000" ;;
+    qwen38-flash-next-v029) echo "500000" ;;
     *) return 1 ;;
   esac
 }
@@ -209,20 +221,11 @@ resolve_gpu_memory() {
         echo "0.85"
       fi
       ;;
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
-      # 125B MoE (6B active) + 51B PLE n-gram embedding + 4B MTP. The PLE
-      # table (~48 GB) is mmapped from NVMe (VLLM_PLE_MMAP), so the resident
-      # footprint is ~76 GB. Reserve progressively more of the unified pool
-      # for KV as context grows; the 1M endpoint is the validated upper bound.
-      if [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len >= 1048576 )); then
-        echo "0.905"
-      elif [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len >= 786432 )); then
-        echo "0.89"
-      elif [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len >= 393216 )); then
-        echo "0.87"
-      else
-        echo "0.85"
-      fi ;;
+    qwen38-flash-next-v029)
+      # The released v0.29 recipe reserves a conservative 20% of the
+      # unified pool for the host, PLE page faults, and long-context growth.
+      echo "0.80"
+      ;;
     *) echo "0.8" ;;
   esac
 }
@@ -244,7 +247,7 @@ ENGINE_RECOMMENDED_MODELS=(
   "ucbye/Qwen3-Coder-Next-NVFP4-GB10|~46GB|pinned, ungated 80B/3B hybrid Gated-DeltaNet coder; FlashInfer+Marlin NVFP4 recipe, native 256K context"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
   "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft; measured ~20 tok/s single-stream with MTP"
-  "qwen38-flash-next|~135GB|125B MoE + PLE mmap; 500K prefix-cache profile (RadixArk/Qwen3.8-Flash-Next-NVFP4)"
+  "qwen38-flash-next-v029|~135GB|RECOMMENDED: vLLM 0.29, fixed prefix cache, deterministic GB10 top-k, 500K YaRN"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -323,7 +326,7 @@ resolve_tool_call_parser() {
       echo "qwen3_coder"
       return
       ;;
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+    qwen38-flash-next-v029)
       echo "qwen3_coder"
       return
       ;;
@@ -400,7 +403,7 @@ resolve_reasoning_parser() {
   # before the *Qwen3*Next* catch-all below, which would otherwise return
   # empty and disable reasoning output for Flash-Next.
   case "$model" in
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*) echo "qwen3"; return ;;
+    qwen38-flash-next-v029) echo "qwen3"; return ;;
   esac
 
   case "$model" in
@@ -428,7 +431,7 @@ resolve_reasoning_parser() {
 
 is_qwen38_model() {
   case "$1" in
-    *Qwen3.8*|*qwen3.8*) return 0 ;;
+    *Qwen3.8*|*qwen3.8*|qwen38-flash-next-v029) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -468,16 +471,13 @@ configure_qwen38_profile() {
       # predictor is MTP, so speculation stays on the model's own MTP head.
       default_speculative_mode="mtp"
       ;;
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
-      # 125B MoE (6B active) + 51B PLE n-gram embedding + 4B MTP.
-      # The PLE table (~48 GB) must be mmapped from NVMe to fit in 128 GB
-      # unified memory. Requires the blazux custom image (qwen38-flash-dgx)
-      # which includes the PLE mmap patch and deterministic top-k kernel.
-      # See: https://github.com/blazux/qwen3.8-Flash-DGX
+    qwen38-flash-next-v029)
+      # The PLE table (~48 GB) is mmapped from NVMe; v0.29 adds the
+      # prefix-cache, GB10 kernel, and deterministic top-k fixes.
       default_speculative_mode="mtp"
-      default_speculative_tokens=1
-      max_num_seqs=1
-      batch_tokens=1024
+      default_speculative_tokens=2
+      max_num_seqs=8
+      batch_tokens=8192
       QWEN38_ENV_ARGS+=(
         -e "VLLM_PLE_MMAP=1"
         -e "VLLM_PLE_MMAP_WORKERS=32"
@@ -485,11 +485,21 @@ configure_qwen38_profile() {
         -e "VLLM_PLE_MMAP_TRIM_MIN_ROWS=${VLLM_FLASH_NEXT_PLE_TRIM_MIN_ROWS:-1024}"
       )
       QWEN38_ARGS+=(--load-format safetensors --no-enable-flashinfer-autotune)
+      QWEN38_ARGS+=(
+        -cc.cudagraph_mode=PIECEWISE
+        '-cc.splitting_ops=["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen4_exp_compute_ple_ngram_ids","vllm::qwen4_exp_ple_short_conv","vllm::qwen4_exp_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::sparse_attn_indexer","vllm::ple_mmap_lookup_ids"]'
+      )
+      QWEN38_ENV_ARGS+=(
+        -e "VLLM_QSA_DET_TOPK=1"
+        -e "VLLM_QSA_DET_LIB=/opt/llm/kernel-det/_C_det.so"
+        -e "VLLM_MTP_DRAFT_VOCAB=/opt/llm/draft_vocab_65536.npy"
+        -e "VLLM_PLE_MMAP_MADVISE=random"
+      )
       ;;
   esac
 
   QWEN38_ARGS+=(--max-num-batched-tokens "$batch_tokens")
-  if [[ "$model" == *Qwen3.8-Flash-Next* || "$model" == *qwen3.8-flash-next* ]]; then
+  if is_flash_next_model "$model"; then
     if [[ "${VLLM_FLASH_NEXT_PREFIX_CACHING:-1}" != "0" ]]; then
       QWEN38_ARGS+=(--enable-prefix-caching)
     else
@@ -511,7 +521,7 @@ configure_qwen38_profile() {
       elif [[ "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
         local speculative_config
         speculative_config="{\"method\":\"mtp\",\"num_speculative_tokens\":${speculative_tokens}}"
-        if [[ "$model" == *Qwen3.8-Flash-Next* || "$model" == *qwen3.8-flash-next* ]] &&
+        if is_flash_next_model "$model" &&
            [[ "$max_len" =~ ^[0-9]+$ ]]; then
           # The YaRN override is not propagated to the MTP draft model.
           speculative_config="{\"method\":\"mtp\",\"num_speculative_tokens\":${speculative_tokens},\"max_model_len\":${max_len}}"
@@ -566,7 +576,7 @@ configure_qwen38_profile() {
 engine_run_container() {
   local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5" tool_call_parser="${6:-}" reasoning_parser="${7:-}"
   local served_model_name_args=()
-  if [[ "$model" == "RadixArk/Qwen3.8-Flash-Next-NVFP4" ]]; then
+  if is_flash_next_model "$model"; then
     local flash_aliases="${VLLM_FLASH_NEXT_MODEL_ALIASES:-qwen3.8-flash-next,gpt-5.4-nano}"
     local -a flash_alias_args=()
     local alias
@@ -575,7 +585,7 @@ engine_run_container() {
     for alias in "${flash_alias_args[@]}"; do
       [[ -n "$alias" ]] && served_model_name_args+=("$alias")
     done
-    served_model_name_args+=("$model")
+    served_model_name_args+=(qwen3.8-flash-next-v029)
   elif [[ -n "${VLLM_SERVED_MODEL_NAME:-}" ]]; then
     if [[ "${VLLM_SERVED_MODEL_NAME}" =~ [[:space:]] ]]; then
       echo "ERROR: VLLM_SERVED_MODEL_NAME must be a single model alias without whitespace." >&2
@@ -758,6 +768,20 @@ engine_run_container() {
     qwen38_args=("${QWEN38_ARGS[@]}")
     speculative_args=("${QWEN38_SPECULATIVE_ARGS[@]}")
     qwen38_serve_command=("${QWEN38_SERVE_COMMAND[@]}")
+  fi
+  if is_flash_next_model "$model"; then
+    local flash_checkpoint_model
+    flash_checkpoint_model=$(flash_next_checkpoint_model)
+    local flash_repo_dir="$HUB_CACHE/models--${flash_checkpoint_model//\//--}"
+    local flash_snapshot_host
+    flash_snapshot_host=$(find "$flash_repo_dir/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)
+    if [[ -z "$flash_snapshot_host" ]]; then
+      echo "ERROR: Flash-Next checkpoint snapshot was not found under $flash_repo_dir." >&2
+      echo "  Pull it first with: dgxt model-pull $flash_checkpoint_model" >&2
+      return 1
+    fi
+    local flash_snapshot_container="/root/.cache/huggingface/hub/${flash_repo_dir#"$HUB_CACHE"/}/snapshots/$(basename "$flash_snapshot_host")"
+    qwen38_serve_command=(vllm serve "$flash_snapshot_container")
   fi
 
   # NVIDIA's Qwen3.6 DGX Spark recipe (vLLM >= 0.28) uses the NVFP4
@@ -981,8 +1005,8 @@ engine_run_container() {
   local image
   image=$(resolve_engine_image "$model")
   case "$model" in
-    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
-      ensure_flash_next_image "$image" || return 1
+    qwen38-flash-next-v029)
+      ensure_flash_next_v029_image "$image" || return 1
       ;;
   esac
 

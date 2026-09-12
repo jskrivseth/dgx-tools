@@ -2,7 +2,7 @@
 # Quick check that the server is up, coherent, and measure prefill + decode.
 #   scripts/smoke-test.sh [host:port]
 set -euo pipefail
-EP="${1:-localhost:18300}"
+EP="${1:-localhost:8000}"
 BASE="http://$EP"
 
 echo ">> health"

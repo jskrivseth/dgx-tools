@@ -65,19 +65,24 @@ Requirements:
 - about 130 GB of fast local storage; NVMe is strongly recommended
 - roughly 10 minutes for a cold model load on the tested machine
 
+Within `dgxt`, `qwen3.8-flash-next`, `qwen38-flash-next-v029`, and the full
+checkpoint ID all select the released vLLM 0.29 profile. The API advertises
+the short model name instead of the full Hugging Face repository ID.
+
+The v0.29 profile builds
+`vllm/vllm-openai:v0.29.0` with the re-targeted PLE mmap hook, prefix-cache
+block-size fix, GB10 FLA/top-k fixes, and reduced MTP draft vocabulary:
+
 ```bash
-./containers/qwen3.8-flash-next/scripts/build-image.sh
-./containers/qwen3.8-flash-next/scripts/download-weights.sh
-./containers/qwen3.8-flash-next/scripts/serve-1m.sh
-docker logs -f qwen38-flash-1m
+dgxt setup
+# select: qwen38-flash-next-v029
+dgxt start qwen38-flash-next-v029 --max-context 512k
 ```
 
-The server is ready when the log says `Application startup complete`. It exposes
-an OpenAI-compatible API on port `8000` by default:
-
-Within `dgxt`, the pinned checkpoint can be selected with the short name
-`qwen3.8-flash-next`; the API also advertises that name instead of the full
-Hugging Face repository ID.
+The v0.29 profile defaults to the published NVFP4 checkpoint layout rather
+than the optional hybrid checkpoint, keeps KV cache dtype on `auto`, and uses
+PIECEWISE CUDA graphs. The 500K profile is the recommended starting point;
+768K and 1M remain experimental on a single 128 GB GB10/GX10.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -90,44 +95,6 @@ curl http://localhost:8000/v1/chat/completions \
     "chat_template_kwargs": {"enable_thinking": false}
   }'
 ```
-
-## The long-context serving profile
-
-`scripts/serve-1m.sh` is the standalone wrapper around the repo-owned serve
-script. Its default is a 500K-token profile with prefix caching enabled, trading the
-validated 1M window for reuse of KV blocks across requests with the same
-prefix:
-
-```text
-CTX=500000
-YARN=1
-SEQS=1
-GPU_MEM=0.905
-MTP=1
-KV_DTYPE=auto
-PREWARM=0
-PREFIX_CACHING=1
-BATCH_TOKENS=1024
-PLE_TRIM_MIB=8192
-PLE_TRIM_MIN_ROWS=1024
-```
-
-Set `PREFIX_CACHING=0 CTX=1000000` to restore the previous 1M profile. Prefix
-caching was disabled in the original 1M validation because the cached-block
-path had triggered a QSA `CUBLAS_STATUS_INTERNAL_ERROR` on the second identical
-prompt. The shorter default leaves more unified-memory headroom, but the first
-repeated-prefix request should still be smoke-tested before relying on reuse.
-
-Why these values:
-
-- **YaRN factor 4** follows Qwen's published recipe for extending the native
-  262,144-token window to one million tokens.
-- **One sequence** reserves the KV budget for one near-million-token request.
-- **1,024-token chunked prefill** bounds temporary activation memory.
-- **MTP1** nearly doubles decode versus the MTP0 safety profile.
-- **8 GiB PLE watermark** starts evicting clean, re-readable PLE pages before
-  unified memory becomes critical.
-- **1,024-row trim threshold** keeps the trim path out of single-token decode.
 
 ## Where the extra memory came from
 
