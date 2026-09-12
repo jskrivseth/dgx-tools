@@ -227,6 +227,9 @@ cmd_start() {
         ;;
     esac
   done
+  if declare -f normalize_model_alias >/dev/null 2>&1; then
+    model=$(normalize_model_alias "$model")
+  fi
 
   local max_len_var_val
   max_len_var_val=$(parse_context_size "${!ENGINE_MAX_LEN_VAR:-}")
@@ -239,6 +242,9 @@ cmd_start() {
     fi
   elif [[ "$max_len" == "auto" ]]; then
     max_len=$(resolve_default_context "$model")
+  fi
+  if declare -f normalize_context_for_engine >/dev/null 2>&1; then
+    max_len=$(normalize_context_for_engine "$model" "$max_len")
   fi
 
   # If the context length was explicitly requested (CLI flag or a

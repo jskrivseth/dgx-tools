@@ -16,11 +16,83 @@ ENGINE_CONTAINER_NAME="vllm-server"
 # ARM64 variant for DGX Spark.
 ENGINE_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:nightly}"
 ENGINE_HF_APPS_FILTER="vllm"
+ENGINE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+normalize_model_alias() {
+  case "$1" in
+    qwen3.8-flash-next|Qwen3.8-Flash-Next)
+      echo "RadixArk/Qwen3.8-Flash-Next-NVFP4" ;;
+    *)
+      echo "$1" ;;
+  esac
+}
+
+# Per-model image resolution. Most models use the default vLLM nightly image,
+# but Flash-Next requires the repo-owned image with PLE mmap offload patches
+# (the 51 GB table must be mmapped from NVMe to fit in 128 GB). Override with
+# VLLM_FLASH_NEXT_IMAGE if you built or tagged a different image.
+resolve_engine_image() {
+  local model="$1"
+  case "$model" in
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+      echo "${VLLM_FLASH_NEXT_IMAGE:-dgxt/qwen38-flash-next:latest}" ;;
+    *)
+      echo "$ENGINE_IMAGE" ;;
+  esac
+}
+
+ensure_flash_next_image() {
+  local image="$1"
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "${VLLM_FLASH_NEXT_AUTO_BUILD:-1}" == "0" ]]; then
+    echo "ERROR: Flash-Next image '$image' is not available locally." >&2
+    echo "  Build it with: $ENGINE_ROOT/containers/qwen3.8-flash-next/scripts/build-image.sh" >&2
+    return 1
+  fi
+  IMAGE="$image" \
+    "$ENGINE_ROOT/containers/qwen3.8-flash-next/scripts/build-image.sh"
+}
 # vLLM can genuinely extend a model past its native context via YaRN RoPE
 # scaling (unlike NIM's precompiled engines, which have no such knob) --
 # see engine_run_container's rope_args and cmd_start's native-max-context
 # check in dgxt for how this gets triggered.
 ENGINE_SUPPORTS_ROPE_SCALING="1"
+
+# Qwen3.6-Fast's last verified DGX Spark profile is native 256K. The
+# current nightly can reach an illegal GDN memory access during warmup when
+# this checkpoint is launched at 512K with the generic YaRN extension.
+resolve_default_context_override() {
+  case "$1" in
+    unsloth/Qwen3.6-35B-A3B-NVFP4-Fast) echo "262144" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prevent a stale VLLM_MAX_MODEL_LEN from re-enabling the known-bad extended
+# context for this exact checkpoint. Other models retain their configured
+# context and RoPE behavior.
+normalize_context_for_engine() {
+  local model="$1"
+  local max_len="$2"
+  if [[ "$model" == "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast" &&
+        "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
+    echo "WARNING: capping Qwen3.6-Fast at its verified DGX Spark context of 262144 tokens." >&2
+    echo "  The current vLLM nightly can fail during GDN warmup above native context." >&2
+    echo "262144"
+  elif [[ "$model" == *Qwen3.8-Flash-Next* || "$model" == *qwen3.8-flash-next* ]] &&
+       [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len > 262144 )); then
+    # Qwen's published Flash-Next extension uses fixed 4x YaRN from the
+    # native 262,144-token window, including the 500K prefix-cache profile.
+    ALLOW_LONG_MAX_MODEL_LEN=1
+    ROPE_SCALING_FACTOR=4
+    ROPE_SCALING_ORIGINAL_MAX=262144
+    echo "$max_len"
+  else
+    echo "$max_len"
+  fi
+}
 
 # NVIDIA's Spark recipe starts the multimodal Omni checkpoint at 131072
 # tokens even though its published native ceiling is 256K. The lower
@@ -28,6 +100,7 @@ ENGINE_SUPPORTS_ROPE_SCALING="1"
 resolve_default_context_override() {
   case "$1" in
     *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*) echo "131072" ;;
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*) echo "500000" ;;
     *) return 1 ;;
   esac
 }
@@ -136,6 +209,12 @@ resolve_gpu_memory() {
         echo "0.85"
       fi
       ;;
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+      # 125B MoE (6B active) + 51B PLE n-gram embedding + 4B MTP. The PLE
+      # table (~48 GB) is mmapped from NVMe (VLLM_PLE_MMAP), so the resident
+      # footprint is ~76 GB. 0.80 leaves ~25 GB for KV cache and Mamba
+      # states, supporting the validated 500K single-sequence profile.
+      echo "0.85" ;;
     *) echo "0.8" ;;
   esac
 }
@@ -157,6 +236,7 @@ ENGINE_RECOMMENDED_MODELS=(
   "ucbye/Qwen3-Coder-Next-NVFP4-GB10|~46GB|pinned, ungated 80B/3B hybrid Gated-DeltaNet coder; FlashInfer+Marlin NVFP4 recipe, native 256K context"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
   "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft; measured ~20 tok/s single-stream with MTP"
+  "RadixArk/Qwen3.8-Flash-Next-NVFP4|~135GB|alias: qwen3.8-flash-next; 125B MoE + PLE mmap; 500K prefix-cache profile"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -235,6 +315,10 @@ resolve_tool_call_parser() {
       echo "qwen3_coder"
       return
       ;;
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+      echo "qwen3_coder"
+      return
+      ;;
     *Llama-3.3-70B*|*llama-3.3-70b*) echo "llama3_json"; return ;;
   esac
 
@@ -304,6 +388,13 @@ resolve_reasoning_parser() {
   # Qwen3-Next's published chat template has no <think> delimiters and this
   # checkpoint emits ordinary answers directly. Applying the generic qwen3
   # parser would therefore classify the whole answer as reasoning content.
+  # Qwen3.8-Flash-Next uses the standard qwen3 reasoning parser. Must match
+  # before the *Qwen3*Next* catch-all below, which would otherwise return
+  # empty and disable reasoning output for Flash-Next.
+  case "$model" in
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*) echo "qwen3"; return ;;
+  esac
+
   case "$model" in
     *Qwen3*Next*|*qwen3*next*) echo ""; return ;;
   esac
@@ -336,7 +427,10 @@ is_qwen38_model() {
 
 configure_qwen38_profile() {
   local model="$1"
+  local max_len="${2:-}"
   local default_speculative_mode="mtp"
+  local default_speculative_tokens=5
+  local max_num_seqs=4
   local speculative_mode
   local speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-${VLLM_MTP_TOKENS:-}}"
 
@@ -348,7 +442,6 @@ configure_qwen38_profile() {
   # shared with RadixArk's checkpoint.
   QWEN38_ARGS=(
     --attention-backend FLASHINFER
-    --max-num-seqs 4
     --max-num-batched-tokens 8192
     --enable-chunked-prefill
     --enable-prefix-caching
@@ -368,27 +461,52 @@ configure_qwen38_profile() {
       # predictor is MTP, so speculation stays on the model's own MTP head.
       default_speculative_mode="mtp"
       ;;
-    Qwen/Qwen3.8-Flash-Next-FP8|qwen/qwen3.8-flash-next-fp8|\
-    nvidia/Qwen3.8-Flash-Next-NVFP4|nvidia/qwen3.8-flash-next-nvfp4)
-      echo "ERROR: $model does not fit a single 128 GB DGX Spark with stock vLLM." >&2
-      echo "  Use the supported GGUF path instead: dgxt engine llama-cpp" >&2
-      echo "  Then run: dgxt start" >&2
-      return 1
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+      # 125B MoE (6B active) + 51B PLE n-gram embedding + 4B MTP.
+      # The PLE table (~48 GB) must be mmapped from NVMe to fit in 128 GB
+      # unified memory. Requires the blazux custom image (qwen38-flash-dgx)
+      # which includes the PLE mmap patch and deterministic top-k kernel.
+      # See: https://github.com/blazux/qwen3.8-Flash-DGX
+      default_speculative_mode="mtp"
+      default_speculative_tokens=1
+      max_num_seqs=1
+      QWEN38_ENV_ARGS+=(
+        -e "VLLM_PLE_MMAP=1"
+        -e "VLLM_PLE_MMAP_WORKERS=32"
+        -e "VLLM_PLE_MMAP_TRIM_AVAILABLE_MIB=${VLLM_FLASH_NEXT_PLE_TRIM_MIB:-8192}"
+        -e "VLLM_PLE_MMAP_TRIM_MIN_ROWS=${VLLM_FLASH_NEXT_PLE_TRIM_MIN_ROWS:-1024}"
+      )
+      QWEN38_ARGS+=(--load-format safetensors --no-enable-flashinfer-autotune
+        --max-num-batched-tokens 1024)
+      if [[ "${VLLM_FLASH_NEXT_PREFIX_CACHING:-1}" != "0" ]]; then
+        QWEN38_ARGS+=(--enable-prefix-caching)
+      else
+        QWEN38_ARGS+=(--no-enable-prefix-caching)
+      fi
       ;;
   esac
+
+  QWEN38_ARGS+=(--max-num-seqs "$max_num_seqs")
   speculative_mode="${VLLM_SPECULATIVE_MODE:-$default_speculative_mode}"
 
   case "${speculative_mode,,}" in
     none)
       ;;
     mtp)
-      speculative_tokens="${speculative_tokens:-5}"
+      speculative_tokens="${speculative_tokens:-$default_speculative_tokens}"
       if [[ "$speculative_tokens" == "0" ]]; then
         :
       elif [[ "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+        local speculative_config
+        speculative_config="{\"method\":\"mtp\",\"num_speculative_tokens\":${speculative_tokens}}"
+        if [[ "$model" == *Qwen3.8-Flash-Next* || "$model" == *qwen3.8-flash-next* ]] &&
+           [[ "$max_len" =~ ^[0-9]+$ ]]; then
+          # The YaRN override is not propagated to the MTP draft model.
+          speculative_config="{\"method\":\"mtp\",\"num_speculative_tokens\":${speculative_tokens},\"max_model_len\":${max_len}}"
+        fi
         QWEN38_SPECULATIVE_ARGS=(
           --speculative-config
-          "{\"method\":\"mtp\",\"num_speculative_tokens\":${speculative_tokens}}"
+          "$speculative_config"
         )
       else
         echo "ERROR: VLLM_SPECULATIVE_TOKENS must be 0 or a positive integer." >&2
@@ -442,6 +560,8 @@ engine_run_container() {
       return 1
     fi
     served_model_name_args=(--served-model-name "$VLLM_SERVED_MODEL_NAME" "$model")
+  elif [[ "$model" == "RadixArk/Qwen3.8-Flash-Next-NVFP4" ]]; then
+    served_model_name_args=(--served-model-name qwen3.8-flash-next "$model")
   fi
   local tool_args=()
   if [[ -n "$tool_call_parser" ]]; then
@@ -523,19 +643,16 @@ engine_run_container() {
   # logged as "Unknown vLLM environment variable"). We keep
   # VLLM_MOE_BACKEND as dgxt's own config var name for continuity, but
   # translate it into --moe-backend here, only when the user has set it.
-  # unsloth's "-Fast" NVFP4 checkpoints (e.g. the new default,
-  # Qwen3.6-35B-A3B-NVFP4-Fast) are a different, purely-NVFP4 calibration
-  # from nvidia's mixed-quant checkpoints above -- they explicitly
-  # document (and this was verified live on this box: ~71.5 tok/s
-  # single-stream, correct output) that auto-selection picks Marlin,
-  # which their own docs say is ~2x slower here. flashinfer_b12x is the
-  # backend their recipe calls for, so default to it for this model
-  # pattern specifically rather than leaving auto/unset like the mixed
-  # checkpoints above. Still overridable via VLLM_MOE_BACKEND (including
-  # setting it empty to fall back to auto).
+  # Unsloth's Qwen3.6 "-Fast" NVFP4 checkpoint is a different, purely-NVFP4
+  # calibration from NVIDIA's mixed-quant checkpoint. Its recipe calls for
+  # flashinfer_b12x (verified live on this box at ~71.5 tok/s single-stream),
+  # but do not broaden this to every future "*NVFP4-Fast*" model: the
+  # selected backend also affects speculative draft-model initialization.
   local moe_backend="${VLLM_MOE_BACKEND:-}"
   case "$model" in
-    *NVFP4-Fast*) moe_backend="${VLLM_MOE_BACKEND:-flashinfer_b12x}" ;;
+    unsloth/Qwen3.6-35B-A3B-NVFP4-Fast)
+      moe_backend="${VLLM_MOE_BACKEND:-flashinfer_b12x}"
+      ;;
   esac
   local moe_backend_args=()
   [[ -n "$moe_backend" ]] && moe_backend_args=(--moe-backend "$moe_backend")
@@ -576,7 +693,9 @@ engine_run_container() {
   # https://huggingface.co/unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
   local fast_env=()
   case "$model" in
-    *NVFP4-Fast*) fast_env=(-e "CUTE_DSL_ARCH=sm_121a") ;;
+    unsloth/Qwen3.6-35B-A3B-NVFP4-Fast)
+      fast_env=(-e "CUTE_DSL_ARCH=sm_121a")
+      ;;
   esac
 
   # gpt-oss (native MXFP4, attention sinks) needs two Blackwell
@@ -614,7 +733,7 @@ engine_run_container() {
   local qwen38_env=() qwen38_args=() speculative_args=()
   local qwen38_serve_command=(vllm serve "$model")
   if is_qwen38_model "$model"; then
-    configure_qwen38_profile "$model" || return 1
+    configure_qwen38_profile "$model" "$max_len" || return 1
     qwen38_env=("${QWEN38_ENV_ARGS[@]}")
     qwen38_args=("${QWEN38_ARGS[@]}")
     speculative_args=("${QWEN38_SPECULATIVE_ARGS[@]}")
@@ -683,47 +802,12 @@ engine_run_container() {
       esac
       ;;
     unsloth/Qwen3.6-35B-A3B-NVFP4-Fast)
-      # Unsloth's Fast checkpoint is compressed-tensors/NVFP4 and
-      # auto-detects its quantization. Keep its native B12X MoE backend
-      # selection above, and add the compatible low-concurrency serving
-      # profile used for the same Qwen3.6 hybrid architecture.
-      qwen36_args=(
-        --host 0.0.0.0
-        --tensor-parallel-size 1
-        --trust-remote-code
-        --kv-cache-dtype fp8
-        --max-num-seqs 4
-        --max-num-batched-tokens 8192
-        --enable-chunked-prefill
-        --async-scheduling
-        --enable-prefix-caching
-      )
-
-      local qwen36_fast_speculative_mode="${VLLM_SPECULATIVE_MODE:-mtp}"
-      local qwen36_fast_speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-2}"
-      if [[ "${qwen36_fast_speculative_mode,,}" == "dspark" || "${qwen36_fast_speculative_mode,,}" == "dflash" ]]; then
-        echo "WARNING: VLLM_SPECULATIVE_MODE=$qwen36_fast_speculative_mode is not supported for Qwen3.6-Fast; using mtp." >&2
-        echo "  Set VLLM_SPECULATIVE_MODE=none to disable speculative decoding." >&2
-        qwen36_fast_speculative_mode="mtp"
-      fi
-      case "${qwen36_fast_speculative_mode,,}" in
-        none)
-          ;;
-        mtp)
-          if [[ ! "$qwen36_fast_speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
-            echo "ERROR: VLLM_SPECULATIVE_TOKENS must be a positive integer." >&2
-            return 1
-          fi
-          qwen36_fast_speculative_args=(
-            --speculative-config
-            "{\"method\":\"mtp\",\"num_speculative_tokens\":${qwen36_fast_speculative_tokens}}"
-          )
-          ;;
-        *)
-          echo "ERROR: VLLM_SPECULATIVE_MODE must be mtp or none for Qwen3.6-Fast." >&2
-          return 1
-          ;;
-      esac
+      # The verified Fast run used the generic serving path: no speculative
+      # draft, KV-cache override, or extra scheduler flags. The current
+      # nightly's TorchInductor/Triton autotuning path can hit an illegal
+      # CUDA address during GDN warmup, so use eager execution for this
+      # exact compatibility profile.
+      qwen36_args=(--enforce-eager)
       ;;
     ornith-ai/Ornith-1.5-35B-A3B-NVFP4)
       # Ornith is a Qwen3.5 MoE-compatible ModelOpt NVFP4 checkpoint.
@@ -874,6 +958,14 @@ engine_run_container() {
   local model_args=("${nemotron_args[@]}" "${gptoss_args[@]}" "${qwen38_args[@]}" "${qwen36_args[@]}" "${ornith_args[@]}" "${omni_args[@]}" "${codernext_args[@]}")
   local model_volumes=("${gptoss_vol[@]}")
 
+  local image
+  image=$(resolve_engine_image "$model")
+  case "$model" in
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+      ensure_flash_next_image "$image" || return 1
+      ;;
+  esac
+
   docker run -d \
     --name "$ENGINE_CONTAINER_NAME" \
     --gpus all \
@@ -888,7 +980,7 @@ engine_run_container() {
     "${model_env[@]}" \
     -v "${HUB_CACHE}:/root/.cache/huggingface/hub" \
     "${model_volumes[@]}" \
-    "$ENGINE_IMAGE" \
+    "$image" \
     "${qwen38_serve_command[@]}" \
     "${served_model_name_args[@]}" \
     "${max_len_args[@]}" \
