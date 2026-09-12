@@ -20,7 +20,7 @@ ENGINE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 normalize_model_alias() {
   case "$1" in
-    qwen3.8-flash-next|Qwen3.8-Flash-Next)
+    qwen38-flash-next|qwen3.8-flash-next|Qwen3.8-Flash-Next)
       echo "RadixArk/Qwen3.8-Flash-Next-NVFP4" ;;
     *)
       echo "$1" ;;
@@ -212,9 +212,17 @@ resolve_gpu_memory() {
     *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
       # 125B MoE (6B active) + 51B PLE n-gram embedding + 4B MTP. The PLE
       # table (~48 GB) is mmapped from NVMe (VLLM_PLE_MMAP), so the resident
-      # footprint is ~76 GB. 0.80 leaves ~25 GB for KV cache and Mamba
-      # states, supporting the validated 500K single-sequence profile.
-      echo "0.85" ;;
+      # footprint is ~76 GB. Reserve progressively more of the unified pool
+      # for KV as context grows; the 1M endpoint is the validated upper bound.
+      if [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len >= 1048576 )); then
+        echo "0.905"
+      elif [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len >= 786432 )); then
+        echo "0.89"
+      elif [[ "$max_len" =~ ^[0-9]+$ ]] && (( max_len >= 393216 )); then
+        echo "0.87"
+      else
+        echo "0.85"
+      fi ;;
     *) echo "0.8" ;;
   esac
 }
@@ -236,7 +244,7 @@ ENGINE_RECOMMENDED_MODELS=(
   "ucbye/Qwen3-Coder-Next-NVFP4-GB10|~46GB|pinned, ungated 80B/3B hybrid Gated-DeltaNet coder; FlashInfer+Marlin NVFP4 recipe, native 256K context"
   "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
   "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft; measured ~20 tok/s single-stream with MTP"
-  "RadixArk/Qwen3.8-Flash-Next-NVFP4|~135GB|alias: qwen3.8-flash-next; 125B MoE + PLE mmap; 500K prefix-cache profile"
+  "qwen38-flash-next|~135GB|125B MoE + PLE mmap; 500K prefix-cache profile (RadixArk/Qwen3.8-Flash-Next-NVFP4)"
   "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
   "Qwen/Qwen3-32B|~64GB|full precision, dense"
   "Qwen/Qwen3-8B|~16GB|fast, smaller"
@@ -431,6 +439,7 @@ configure_qwen38_profile() {
   local default_speculative_mode="mtp"
   local default_speculative_tokens=5
   local max_num_seqs=4
+  local batch_tokens=8192
   local speculative_mode
   local speculative_tokens="${VLLM_SPECULATIVE_TOKENS:-${VLLM_MTP_TOKENS:-}}"
 
@@ -442,9 +451,7 @@ configure_qwen38_profile() {
   # shared with RadixArk's checkpoint.
   QWEN38_ARGS=(
     --attention-backend FLASHINFER
-    --max-num-batched-tokens 8192
     --enable-chunked-prefill
-    --enable-prefix-caching
     --distributed-executor-backend mp
   )
   QWEN38_SPECULATIVE_ARGS=()
@@ -470,22 +477,27 @@ configure_qwen38_profile() {
       default_speculative_mode="mtp"
       default_speculative_tokens=1
       max_num_seqs=1
+      batch_tokens=1024
       QWEN38_ENV_ARGS+=(
         -e "VLLM_PLE_MMAP=1"
         -e "VLLM_PLE_MMAP_WORKERS=32"
         -e "VLLM_PLE_MMAP_TRIM_AVAILABLE_MIB=${VLLM_FLASH_NEXT_PLE_TRIM_MIB:-8192}"
         -e "VLLM_PLE_MMAP_TRIM_MIN_ROWS=${VLLM_FLASH_NEXT_PLE_TRIM_MIN_ROWS:-1024}"
       )
-      QWEN38_ARGS+=(--load-format safetensors --no-enable-flashinfer-autotune
-        --max-num-batched-tokens 1024)
-      if [[ "${VLLM_FLASH_NEXT_PREFIX_CACHING:-1}" != "0" ]]; then
-        QWEN38_ARGS+=(--enable-prefix-caching)
-      else
-        QWEN38_ARGS+=(--no-enable-prefix-caching)
-      fi
+      QWEN38_ARGS+=(--load-format safetensors --no-enable-flashinfer-autotune)
       ;;
   esac
 
+  QWEN38_ARGS+=(--max-num-batched-tokens "$batch_tokens")
+  if [[ "$model" == *Qwen3.8-Flash-Next* || "$model" == *qwen3.8-flash-next* ]]; then
+    if [[ "${VLLM_FLASH_NEXT_PREFIX_CACHING:-1}" != "0" ]]; then
+      QWEN38_ARGS+=(--enable-prefix-caching)
+    else
+      QWEN38_ARGS+=(--no-enable-prefix-caching)
+    fi
+  else
+    QWEN38_ARGS+=(--enable-prefix-caching)
+  fi
   QWEN38_ARGS+=(--max-num-seqs "$max_num_seqs")
   speculative_mode="${VLLM_SPECULATIVE_MODE:-$default_speculative_mode}"
 
@@ -554,14 +566,22 @@ configure_qwen38_profile() {
 engine_run_container() {
   local model="$1" max_len="$2" port="$3" gpu_mem="$4" api_key="$5" tool_call_parser="${6:-}" reasoning_parser="${7:-}"
   local served_model_name_args=()
-  if [[ -n "${VLLM_SERVED_MODEL_NAME:-}" ]]; then
+  if [[ "$model" == "RadixArk/Qwen3.8-Flash-Next-NVFP4" ]]; then
+    local flash_aliases="${VLLM_FLASH_NEXT_MODEL_ALIASES:-qwen3.8-flash-next,gpt-5.4-nano}"
+    local -a flash_alias_args=()
+    local alias
+    IFS=',' read -r -a flash_alias_args <<< "$flash_aliases"
+    served_model_name_args=(--served-model-name)
+    for alias in "${flash_alias_args[@]}"; do
+      [[ -n "$alias" ]] && served_model_name_args+=("$alias")
+    done
+    served_model_name_args+=("$model")
+  elif [[ -n "${VLLM_SERVED_MODEL_NAME:-}" ]]; then
     if [[ "${VLLM_SERVED_MODEL_NAME}" =~ [[:space:]] ]]; then
       echo "ERROR: VLLM_SERVED_MODEL_NAME must be a single model alias without whitespace." >&2
       return 1
     fi
     served_model_name_args=(--served-model-name "$VLLM_SERVED_MODEL_NAME" "$model")
-  elif [[ "$model" == "RadixArk/Qwen3.8-Flash-Next-NVFP4" ]]; then
-    served_model_name_args=(--served-model-name qwen3.8-flash-next "$model")
   fi
   local tool_args=()
   if [[ -n "$tool_call_parser" ]]; then

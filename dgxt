@@ -608,9 +608,9 @@ configure_setup_model_options() {
         context_values=(32768 65536 131072 262144)
         context_labels=("32K" "64K, recommended" "128K, more memory" "256K, native maximum")
       else
-        context_default=262144
-        context_values=(131072 262144)
-        context_labels=("128K" "256K, native/recommended")
+        context_default=524288
+        context_values=(131072 262144 393216 524288 786432 1048576)
+        context_labels=("128K" "256K, native" "384K, balanced" "512K, recommended" "768K, tight memory" "1M, maximum")
       fi
       ;;
     *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*|*Ornith-1.5*|*ornith-1.5*|*Qwen3*Next*|*qwen3*next*)
@@ -864,6 +864,9 @@ cmd_setup() {
     else
       model="$model_input"
     fi
+  fi
+  if declare -f normalize_model_alias >/dev/null 2>&1; then
+    model=$(normalize_model_alias "$model")
   fi
   save_config_value "$ENGINE_MODEL_VAR" "$model"
   if engine_defines_var "$ENGINE_MAX_LEN_VAR"; then
