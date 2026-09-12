@@ -14,7 +14,7 @@ ENGINE_CONTAINER_NAME="vllm-server"
 # The stable v0.28.0 image still misroutes RadixArk's Qwen3 DSpark draft.
 # Nightly contains the upstream architecture normalization and publishes an
 # ARM64 variant for DGX Spark.
-ENGINE_IMAGE="vllm/vllm-openai:nightly"
+ENGINE_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:nightly}"
 ENGINE_HF_APPS_FILTER="vllm"
 # vLLM can genuinely extend a model past its native context via YaRN RoPE
 # scaling (unlike NIM's precompiled engines, which have no such knob) --
@@ -125,7 +125,7 @@ resolve_gpu_memory() {
         echo "0.85"
       fi
       ;;
-    *Qwen3*Next*)
+    *Qwen3-Coder-Next*|*qwen3-coder-next*|*Qwen3-Next*|*qwen3-next*)
       # The NVFP4-GB10 quant is ~46GB; 0.85 leaves generous KV
       # headroom at native 256K (cheap 4-KV-head cache). Drop the fraction
       # when stretching past native context so the larger KV pool still
@@ -367,6 +367,13 @@ configure_qwen38_profile() {
       # Unsloth's NVFP4 has no third-party DSpark draft; its trained
       # predictor is MTP, so speculation stays on the model's own MTP head.
       default_speculative_mode="mtp"
+      ;;
+    Qwen/Qwen3.8-Flash-Next-FP8|qwen/qwen3.8-flash-next-fp8|\
+    nvidia/Qwen3.8-Flash-Next-NVFP4|nvidia/qwen3.8-flash-next-nvfp4)
+      echo "ERROR: $model does not fit a single 128 GB DGX Spark with stock vLLM." >&2
+      echo "  Use the supported GGUF path instead: dgxt engine llama-cpp" >&2
+      echo "  Then run: dgxt start" >&2
+      return 1
       ;;
   esac
   speculative_mode="${VLLM_SPECULATIVE_MODE:-$default_speculative_mode}"
@@ -758,7 +765,7 @@ engine_run_container() {
           ;;
       esac
       ;;
-    *Qwen3*Next*)
+    *Qwen3-Coder-Next*|*qwen3-coder-next*|*Qwen3-Next*|*qwen3-next*)
       # The NVFP4-GB10 quant and its ucbye mirror use the same
       # 80B/3B hybrid Gated-DeltaNet
       # coder (Qwen3NextForCausalLM). FlashInfer handles attention; the

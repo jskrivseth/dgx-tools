@@ -9,7 +9,7 @@
 #   https://huggingface.co/docs/huggingface_hub/en/guides/cli
 #
 # Engines are pluggable (lib/engines/*.sh). Currently implemented: vLLM,
-# SGLang, and NIM. Placeholders exist for TensorRT-LLM and Ollama.
+# SGLang, llama.cpp, and NIM. Placeholders exist for TensorRT-LLM and Ollama.
 #
 # Quick start:
 #   dgxt setup                              Guided: pick engine, prereqs, hf auth, pick a model, start
@@ -595,6 +595,17 @@ configure_setup_model_options() {
       context_default=131072
       context_values=(65536 131072 262144)
       context_labels=("64K" "128K, default" "256K")
+      ;;
+    *Qwen3.8-Flash-Next*|*qwen3.8-flash-next*)
+      if [[ "$CURRENT_ENGINE" == "llama-cpp" ]]; then
+        context_default=65536
+        context_values=(32768 65536 131072 262144)
+        context_labels=("32K" "64K, recommended" "128K, more memory" "256K, native maximum")
+      else
+        context_default=262144
+        context_values=(131072 262144)
+        context_labels=("128K" "256K, native/recommended")
+      fi
       ;;
     *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*|*Ornith-1.5*|*ornith-1.5*|*Qwen3*Next*|*qwen3*next*)
       context_default=262144

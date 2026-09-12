@@ -5,8 +5,8 @@ similar single-GPU ARM64 NVIDIA workstation) as fast as possible — no
 native builds, no dependency wrangling beyond Docker and the official
 HuggingFace CLI.
 
-Currently implemented: **vLLM**, **SGLang**, and **NIM**. Placeholders exist
-for TensorRT-LLM, llama.cpp, and Ollama (see [Engines](#engines)).
+Currently implemented: **vLLM**, **SGLang**, **llama.cpp**, and **NIM**.
+Placeholders exist for TensorRT-LLM and Ollama (see [Engines](#engines)).
 
 dgxt does **not** reimplement anything the `hf` CLI already does well —
 searching, downloading, cache management, and auth are all thin
@@ -273,8 +273,41 @@ auto-generated).
 | `nim` | ready |
 | `tensorrt-llm` | planned |
 | `sglang` | ready |
-| `llama-cpp` | planned |
+| `llama-cpp` | ready |
 | `ollama` | planned |
+
+The llama.cpp engine is the single-Spark path for Qwen3.8-Flash-Next:
+
+```bash
+dgxt engine llama-cpp
+dgxt start
+```
+
+It uses the official multi-architecture
+`ghcr.io/ggml-org/llama.cpp:server-cuda` image and defaults to
+`unsloth/Qwen3.8-Flash-Next-GGUF:UD-IQ4_XS`. That quant is about 94 GB
+(87.24 GiB) and is the highest-quality published quant measured with the full
+262,144-token context on one Spark. dgxt keeps one request slot, loads all
+weights directly into unified memory, uses `q8_0` KV caches (about 3 GiB at
+full context), and uses 2048-token batches for fast prefill. Multimodal
+projection is disabled to preserve memory headroom.
+
+Short-prompt decode remains about 27 tok/s with a 256K allocation. Performance
+falls as the active prompt approaches the limit: a published 185K-token test
+measured about 181 tok/s prefill and 8.5 tok/s decode, so a nearly full window
+is useful but not interactive-fast. Configure it with:
+
+```ini
+LLAMA_CPP_MODEL=unsloth/Qwen3.8-Flash-Next-GGUF:UD-IQ4_XS
+LLAMA_CPP_MAX_MODEL_LEN=262144
+LLAMA_CPP_PARALLEL=1
+```
+
+The official Qwen FP8 checkpoint is about 173 GiB and cannot fit this
+hardware. NVIDIA's roughly 124 GiB NVFP4 checkpoint also leaves no room for
+the OS, server runtime, or KV cache under stock vLLM; its published supported
+hardware is B200/B300. dgxt therefore rejects those checkpoints on its
+single-Spark vLLM path instead of allowing another machine-wide OOM.
 
 The SGLang engine supports four DGX Spark recipes, each with its own dev
 image, speculative-decoding default, and architecture flags:

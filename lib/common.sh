@@ -214,7 +214,10 @@ wait_for_ready() {
   trap 'kill "$log_pid" 2>/dev/null || true; trap - RETURN' RETURN
 
   local elapsed=0
-  local timeout=900
+  # Large GGUF models can spend many minutes downloading and loading before
+  # the health endpoint exists. Engines may extend the generic 15-minute
+  # default for their known startup characteristics.
+  local timeout="${ENGINE_STARTUP_TIMEOUT:-900}"
   while [[ $elapsed -lt $timeout ]]; do
     if curl -sf "http://localhost:${port}/health" >/dev/null 2>&1; then
       kill "$log_pid" 2>/dev/null || true
