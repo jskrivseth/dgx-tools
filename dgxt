@@ -589,15 +589,22 @@ cmd_help() {
 # practical Spark ranges differ across checkpoints.
 configure_setup_model_options() {
   local model="$1"
+  local model_key="$model"
+  if declare -f model_profile >/dev/null 2>&1; then
+    model_key=$(model_profile "$model")
+    # Keep legacy context menus for supported profiles that are not yet in
+    # the exact registry; runtime overrides still use the generic fallback.
+    [[ "$model_key" == "generic" ]] && model_key="$model"
+  fi
   local context_default
   local -a context_values=() context_labels=()
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$model_key" in
+    nemotron35)
       context_default=1048576
       context_values=(131072 262144 524288 1048576)
       context_labels=("128K" "256K, native/recommended" "512K" "1M")
       ;;
-    *Nemotron-3-Nano-Omni*|*nemotron-3-nano-omni*)
+    nemotron-omni)
       context_default=131072
       context_values=(65536 131072 262144)
       context_labels=("64K" "128K, default" "256K")
@@ -607,7 +614,7 @@ configure_setup_model_options() {
       context_values=(131072 262144 393216 524288 786432 1048576)
       context_labels=("128K" "256K, native" "384K, balanced" "512K, recommended" "768K, experimental" "1M, experimental")
       ;;
-    *Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*|*Ornith-1.5*|*ornith-1.5*|*Qwen3*Next*|*qwen3*next*)
+    qwen36|qwen36-fast|qwen38|qwen38-unsloth)
       context_default=262144
       context_values=(131072 262144)
       context_labels=("128K" "256K, native/recommended")
@@ -818,46 +825,157 @@ cmd_setup() {
   echo "  Current default: $model"
   echo ""
 
-  # Build a single numbered picker: already-downloaded models first (ready
-  # to serve right now, no wait), then the hardcoded recommendations that
-  # aren't already downloaded. picks[N] maps a menu number to a model id.
+  # Curated recommendations use a four-field format:
+  # family|checkpoint/profile|approx size|description. Presenting the
+  # family first keeps alternate checkpoints and runtime images together.
   local -a picks=()
-  local cached_list cached_line cid csize entry mid size note already_listed
-
+  local cached_list cid csize entry family mid size note image
   cached_list=$(list_cached_models)
-  if [[ -n "$cached_list" ]]; then
-    echo "  Already downloaded (ready to serve now):"
-    while IFS='|' read -r cid csize; do
-      [[ -z "$cid" ]] && continue
-      picks+=("$cid")
-      printf "    %2d) %-46s %s\n" "${#picks[@]}" "$cid" "$csize"
-    done <<< "$cached_list"
+  local -a families=() family_notes=()
+  local family_index family_choice
+  local grouped_recommendations=1
+  for entry in "${ENGINE_RECOMMENDED_MODELS[@]}"; do
+    IFS='|' read -r family mid size note <<< "$entry"
+    if [[ -z "$note" ]]; then
+      grouped_recommendations=0
+      break
+    fi
+    local known_family=0 family_pos
+    for family_pos in "${!families[@]}"; do
+      if [[ "${families[$family_pos]}" == "$family" ]]; then
+        known_family=1
+        break
+      fi
+    done
+    if [[ "$known_family" == "0" ]]; then
+      families+=("$family")
+      family_notes+=("$note")
+    fi
+  done
+  families+=("Custom / manual model")
+  family_notes+=("enter a Hugging Face ID or choose an uncatalogued cached checkpoint")
+
+  if [[ "$grouped_recommendations" == "1" && "${#families[@]}" -gt 0 ]]; then
+    echo "  Model families:"
+    for family_index in "${!families[@]}"; do
+      printf "    %2d) %-30s %s\n" "$((family_index + 1))" \
+        "${families[$family_index]}" "${family_notes[$family_index]}"
+    done
     echo ""
+    read -rp "  Choose a model family (number, family name, or enter for current default): " family_choice
+    if [[ -n "$family_choice" ]]; then
+      if [[ "$family_choice" =~ ^[0-9]+$ && "$family_choice" -ge 1 &&
+            "$family_choice" -le "${#families[@]}" ]]; then
+        family="${families[$((family_choice - 1))]}"
+      else
+        family="$family_choice"
+      fi
+      local -a family_models=()
+      echo ""
+      echo "  Profiles/images for $family:"
+      for entry in "${ENGINE_RECOMMENDED_MODELS[@]}"; do
+        IFS='|' read -r entry_family mid size note <<< "$entry"
+        [[ "$entry_family" == "$family" ]] || continue
+        family_models+=("$mid")
+        image=""
+        if declare -f resolve_engine_image >/dev/null 2>&1; then
+          image=$(resolve_engine_image "$mid")
+        fi
+        printf "    %2d) %-46s %-8s %s%s\n" "${#family_models[@]}" "$mid" "$size" \
+          "$note" "${image:+ [image: $image]}"
+      done
+      # Cached checkpoints belonging to the selected family are variants of
+      # that model, not unrelated catalog entries. They use the same profile
+      # resolution after normalize_model_alias() runs below.
+      if [[ -n "$cached_list" ]]; then
+        while IFS='|' read -r cid csize; do
+          [[ -z "$cid" ]] && continue
+          case "$family" in
+            "Nemotron 3.5 Lightning")
+              [[ "$cid" == *NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 &&
+                 "$cid" != *-DSpark ]] || continue ;;
+            "Qwen3.6-35B-A3B")
+              [[ "$cid" == *Qwen3.6-35B-A3B* ]] || continue ;;
+            "Qwen3.8-27B")
+              [[ "$cid" == *Qwen3.8-27B* && "$cid" != *Flash-Next* &&
+                 "$cid" != *DSpark && "$cid" != *DFlash* ]] || continue ;;
+            "Qwen3.8 Flash-Next")
+              [[ "$cid" == *Qwen3.8-Flash-Next* ]] || continue ;;
+            "Custom / manual model")
+              ;;
+            *) continue ;;
+          esac
+          local normalized_cached normalized_existing already_profile=0
+          normalized_cached="$cid"
+          if declare -f normalize_model_alias >/dev/null 2>&1; then
+            normalized_cached=$(normalize_model_alias "$cid")
+          fi
+          for normalized_existing in "${family_models[@]}"; do
+            if declare -f normalize_model_alias >/dev/null 2>&1; then
+              normalized_existing=$(normalize_model_alias "$normalized_existing")
+            fi
+            if [[ "$normalized_existing" == "$normalized_cached" ]]; then
+              already_profile=1
+              break
+            fi
+          done
+          [[ "$already_profile" == "1" ]] && continue
+          family_models+=("$cid")
+          image=""
+          if declare -f resolve_engine_image >/dev/null 2>&1; then
+            image=$(resolve_engine_image "$normalized_cached")
+          fi
+          printf "    %2d) %-46s %-8s cached checkpoint%s\n" "${#family_models[@]}" "$cid" "$csize" \
+            "${image:+ [image: $image]}"
+        done <<< "$cached_list"
+      fi
+      if [[ "${#family_models[@]}" -eq 0 && "$family" == "Custom / manual model" ]]; then
+        read -rp "  Hugging Face model ID to serve: " model_input
+        if [[ -n "$model_input" ]]; then
+          model="$model_input"
+        else
+          echo "  No custom model entered; keeping '$model'."
+        fi
+      elif [[ "${#family_models[@]}" -eq 0 ]]; then
+        echo "  Unknown model family '$family'; keeping '$model'."
+      elif [[ "${#family_models[@]}" -eq 1 ]]; then
+        model="${family_models[0]}"
+        echo "  Only one effective profile; selected automatically: $model"
+      else
+        echo ""
+        read -rp "  Profile/image (number, model ID, or enter for first): " model_input
+        if [[ "$model_input" =~ ^[0-9]+$ && "$model_input" -ge 1 &&
+              "$model_input" -le "${#family_models[@]}" ]]; then
+          model="${family_models[$((model_input - 1))]}"
+        elif [[ -n "$model_input" ]]; then
+          model="$model_input"
+        else
+          model="${family_models[0]}"
+        fi
+      fi
+    fi
+  else
+    # Backward-compatible fallback for engines that have not adopted grouped
+    # recommendations yet.
+    echo "  Recommended models for this box:"
+    for entry in "${ENGINE_RECOMMENDED_MODELS[@]}"; do
+      IFS='|' read -r mid size note <<< "$entry"
+      picks+=("$mid")
+      printf "    %2d) %-46s %-8s %s\n" "${#picks[@]}" "$mid" "$size" "$note"
+    done
+    echo ""
+    read -rp "  Model to serve (number above, a HF model id, or enter to use default): " model_input
+    if [[ "$model_input" =~ ^[0-9]+$ && "$model_input" -ge 1 && "$model_input" -le "${#picks[@]}" ]]; then
+      model="${picks[$((model_input - 1))]}"
+    elif [[ -n "$model_input" ]]; then
+      model="$model_input"
+    fi
   fi
 
-  echo "  Recommended models for this box:"
-  for entry in "${ENGINE_RECOMMENDED_MODELS[@]}"; do
-    IFS='|' read -r mid size note <<< "$entry"
-    already_listed="0"
-    for cid in "${picks[@]}"; do
-      [[ "$cid" == "$mid" ]] && already_listed="1" && break
-    done
-    [[ "$already_listed" == "1" ]] && continue
-    picks+=("$mid")
-    printf "    %2d) %-46s %-8s %s\n" "${#picks[@]}" "$mid" "$size" "$note"
-  done
   echo ""
   if [[ -n "${ENGINE_HF_APPS_FILTER:-}" ]]; then
     echo "  Browse more: hf models ls --search <query> --apps $ENGINE_NAME --sort downloads"
     echo ""
-  fi
-  read -rp "  Model to serve (number above, a HF model id, or enter to use default): " model_input
-  if [[ -n "$model_input" ]]; then
-    if [[ "$model_input" =~ ^[0-9]+$ && "$model_input" -ge 1 && "$model_input" -le "${#picks[@]}" ]]; then
-      model="${picks[$((model_input - 1))]}"
-    else
-      model="$model_input"
-    fi
   fi
   if declare -f normalize_model_alias >/dev/null 2>&1; then
     model=$(normalize_model_alias "$model")

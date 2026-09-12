@@ -86,9 +86,9 @@ ENGINE_API_KEY_HINT="Generate one at https://org.ngc.nvidia.com/account/api-keys
 # newer additions. Format: "image tag|approx size|note"
 ENGINE_DEFAULT_MODEL="nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest"
 ENGINE_RECOMMENDED_MODELS=(
-  "nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest|~16GB|fast, well-tested tool calling (default)"
-  "nvcr.io/nim/qwen/qwen3-32b-dgx-spark:latest|~64GB|NVFP4, matches this box's vLLM default model"
-  "nvcr.io/nim/nvidia/nvidia-nemotron-nano-9b-v2-dgx-spark:latest|~18GB|hybrid reasoning/non-reasoning, fast"
+  "Llama 3.1 8B|nvcr.io/nim/meta/llama-3.1-8b-instruct-dgx-spark:latest|~16GB|fast, well-tested tool calling (default)"
+  "Qwen3 32B|nvcr.io/nim/qwen/qwen3-32b-dgx-spark:latest|~64GB|NVFP4, general-purpose Spark profile"
+  "Nemotron Nano 9B|nvcr.io/nim/nvidia/nvidia-nemotron-nano-9b-v2-dgx-spark:latest|~18GB|hybrid reasoning/non-reasoning, fast"
 )
 
 # NIM's own cache dirs — distinct from vLLM/HF's ~/.cache/huggingface/hub

@@ -96,15 +96,17 @@ or `dflash` for explicit experiments. `VLLM_SPECULATIVE_MODEL` overrides the
 derived DSpark/DFlash draft model ID, and `VLLM_SPECULATIVE_TOKENS` controls
 the draft length.
 
-The setup model picker also includes these NVIDIA DGX Spark model recipes:
+The setup model picker is hierarchical: first choose a model family, then
+choose the checkpoint/profile (and its resolved runtime image). This keeps
+alternate quantizations and engine-specific images together instead of
+flattening every option into one list. The vLLM catalog currently prioritizes:
 
 | Model | Hugging Face ID | Best for |
 |---|---|---|
-| Nemotron 3 Nano Omni 30B A3B Reasoning | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` | Multimodal reasoning, tool use, and long-context chat |
+| Nemotron 3.5 Lightning | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | General-purpose agentic workloads and long context |
 | Qwen3.6 35B A3B NVFP4 | `nvidia/Qwen3.6-35B-A3B-NVFP4` | Agentic workloads, tool calling, and reasoning |
-| Ornith 1.5 35B A3B NVFP4 | `ornith-ai/Ornith-1.5-35B-A3B-NVFP4` | Coding and agentic reasoning; Spark-tuned NVFP4 alternative |
-| Qwen3-Coder-Next NVFP4 GB10 | `ucbye/Qwen3-Coder-Next-NVFP4-GB10` | Coding and agentic workloads; pinned ungated 80B/3B hybrid model |
-| Llama 3.3 70B Instruct FP4 | `nvidia/Llama-3.3-70B-Instruct-FP4` | General-purpose chat, reasoning, and code generation (TensorRT-LLM optimized) |
+| Qwen3.8 27B | `RadixArk/Qwen3.8-27B-NVFP4` | Dense hybrid-attention model |
+| Qwen3.8 Flash-Next | `RadixArk/Qwen3.8-Flash-Next-NVFP4` | Long-context serving with the vLLM 0.29 profile |
 
 On DGX Spark, prefer the NVFP4 checkpoints. BF16 is retained as a
 Nemotron Omni compatibility fallback, but it uses roughly 62 GB versus

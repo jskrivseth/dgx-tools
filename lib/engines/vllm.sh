@@ -27,6 +27,19 @@ normalize_model_alias() {
   esac
 }
 
+model_profile() {
+  case "$1" in
+    nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4) echo "nemotron35" ;;
+    nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4) echo "nemotron-omni" ;;
+    nvidia/Qwen3.6-35B-A3B-NVFP4) echo "qwen36" ;;
+    unsloth/Qwen3.6-35B-A3B-NVFP4-Fast) echo "qwen36-fast" ;;
+    RadixArk/Qwen3.8-27B-NVFP4) echo "qwen38" ;;
+    unsloth/Qwen3.8-27B-NVFP4) echo "qwen38-unsloth" ;;
+    qwen38-flash-next-v029) echo "qwen38-flash-next-v029" ;;
+    *) echo "generic" ;;
+  esac
+}
+
 is_flash_next_model() {
   case "$1" in
     qwen38-flash-next-v029) return 0 ;;
@@ -231,26 +244,16 @@ resolve_gpu_memory() {
 }
 
 # Recommended models for a DGX Spark-class box (128GB unified memory).
-# Edit this list for your own hardware/preferences — nothing else depends
-# on these specific values. Format: "id|approx size|note"
+# Format: "family|checkpoint/profile|approx size|note". The setup wizard
+# presents families first, then lets the user choose a checkpoint/image.
 ENGINE_DEFAULT_MODEL="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 ENGINE_RECOMMENDED_MODELS=(
-  "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4|~22GB|recommended DGX Spark default -- 1M context and DSpark speculative decoding"
-  "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4|~21GB|multimodal reasoning, tool use, and long-context chat; DGX Spark NVFP4 recipe"
-  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|NVIDIA's recommended agent-ready model for tool calling and reasoning"
-  "nvidia/Llama-3.3-70B-Instruct-FP4|~50GB|general-purpose instruction following and coding; official optimized path is TensorRT-LLM"
-  "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16|~62GB|Nemotron 3 Omni compatibility fallback; use NVFP4 on DGX Spark"
-  "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|best perf on this hardware -- verified ~71.5 tok/s single-stream via FlashInfer B12X MoE backend, same accuracy as the plain NVFP4 checkpoint"
-  "ornith-ai/Ornith-1.5-35B-A3B-NVFP4|~22GB|coding and agentic reasoning specialist; DGX Spark NVFP4 profile with native 256K context"
-  "openai/gpt-oss-120b|~65GB|stronger quality, native MXFP4 MoE, still fast"
-  "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4|~40GB|larger MoE (80B/3B active); benchmarks below default on GPQA/agentic tasks despite the size -- try before trusting the param count"
-  "ucbye/Qwen3-Coder-Next-NVFP4-GB10|~46GB|pinned, ungated 80B/3B hybrid Gated-DeltaNet coder; FlashInfer+Marlin NVFP4 recipe, native 256K context"
-  "RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention VLM, native MTP or matching DSpark draft; GB10 workarounds handled automatically"
-  "unsloth/Qwen3.8-27B-NVFP4|~16GB|same dense VLM but Unsloth Dynamic V3.0 NVFP4 (compressed-tensors, auto-detect) -- MTP speculation, no DSpark draft; measured ~20 tok/s single-stream with MTP"
-  "qwen38-flash-next-v029|~135GB|RECOMMENDED: vLLM 0.29, fixed prefix cache, deterministic GB10 top-k, 500K YaRN"
-  "Qwen/Qwen3.6-35B-A3B|~70GB|full precision"
-  "Qwen/Qwen3-32B|~64GB|full precision, dense"
-  "Qwen/Qwen3-8B|~16GB|fast, smaller"
+  "Nemotron 3.5 Lightning|nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4|~22GB|recommended default; 1M context and DSpark speculation"
+  "Qwen3.6-35B-A3B|nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|NVIDIA NVFP4 agent-ready profile"
+  "Qwen3.6-35B-A3B|unsloth/Qwen3.6-35B-A3B-NVFP4-Fast|~22GB|Unsloth Fast NVFP4 alternative"
+  "Qwen3.8-27B|RadixArk/Qwen3.8-27B-NVFP4|~16GB|dense hybrid-attention profile with MTP/DSpark"
+  "Qwen3.8-27B|unsloth/Qwen3.8-27B-NVFP4|~16GB|Unsloth Dynamic V3.0 NVFP4 alternative"
+  "Qwen3.8 Flash-Next|qwen38-flash-next-v029|~135GB|vLLM 0.29, prefix cache, deterministic GB10 top-k, 500K YaRN"
 )
 
 # vLLM's OpenAI-compatible server rejects any request with tool/function
@@ -430,8 +433,8 @@ resolve_reasoning_parser() {
 }
 
 is_qwen38_model() {
-  case "$1" in
-    *Qwen3.8*|*qwen3.8*|qwen38-flash-next-v029) return 0 ;;
+  case "$(model_profile "$1")" in
+    qwen38|qwen38-unsloth|qwen38-flash-next-v029) return 0 ;;
     *) return 1 ;;
   esac
 }

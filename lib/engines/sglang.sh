@@ -8,8 +8,6 @@
 #   - Qwen3.8-27B NVFP4 (dense hybrid-attention VLM; DFlash2/DSpark/MTP)
 #   - Nemotron 3.5 Lightning 30B-A3B NVFP4 (hybrid Mamba-Transformer MoE;
 #     DSpark/MTP/DFlash; 1M context; ~5,400 tok/s prefill)
-#   - Qwen3-Coder-Next NVFP4 GB10 (80B/3B hybrid GDN coder; DFlash;
-#     150 tok/s short code; requires SGLang patches)
 #   - Qwen3.6 35B A3B NVFP4 (MoE 3B active; MTP speculation; agent-ready)
 #
 # All models use FlashInfer attention and FP8 KV cache.
@@ -48,27 +46,36 @@ ENGINE_DEFAULT_MAX_RUNNING_REQUESTS="8"
 ENGINE_DEFAULT_PORT="8001"
 
 ENGINE_RECOMMENDED_MODELS=(
-  "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4|~22GB|hybrid Mamba-MoE, 3B active, 1M context, DSpark -- fastest prefill on Spark"
-  "saricles/Qwen3-Coder-Next-NVFP4-GB10|~43GB|80B/3B hybrid GDN coder, DFlash -- 150 tok/s short code; requires SGLang patches (see README)"
-  "nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|MoE 3B active, MTP speculation, agent-ready tool calling"
-  "RadixArk/Qwen3.8-27B-NVFP4|~20GB|dense hybrid-attention VLM, DFlash2/DSpark/MTP speculation"
+  "Nemotron 3.5 Lightning|nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4|~22GB|hybrid Mamba-MoE, 3B active, 1M context, DSpark"
+  "Qwen3.6-35B-A3B|nvidia/Qwen3.6-35B-A3B-NVFP4|~18GB|MoE 3B active, MTP speculation, agent-ready tool calling"
+  "Qwen3.8-27B|RadixArk/Qwen3.8-27B-NVFP4|~20GB|dense hybrid-attention VLM, DFlash2/DSpark/MTP speculation"
 )
 
 # ---- Model-specific resolvers -------------------------------------------
+
+# Curated model IDs map to stable internal profiles. Runtime overrides below
+# dispatch on this exact key; an unregistered/manual model gets "generic"
+# instead of accidentally inheriting a sibling model's settings.
+model_profile() {
+  case "$1" in
+    nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4) echo "nemotron35" ;;
+    nvidia/Qwen3.6-35B-A3B-NVFP4) echo "qwen36" ;;
+    RadixArk/Qwen3.8-27B-NVFP4) echo "qwen38" ;;
+    *) echo "generic" ;;
+  esac
+}
 
 # SGLang ships model-specific dev images with optimized kernels. Using the
 # wrong image may lack the architecture support or speculative-decoding
 # integration for that model.
 resolve_engine_image() {
   local model="$1"
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$model")" in
+    nemotron35)
       echo "lmsysorg/sglang:dev-nemotron3-5-lightning" ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
+    qwen36)
       echo "lmsysorg/sglang:nightly-dev-cu13-20260415-2c9e76d3" ;;
-    *Qwen3.6*|*qwen3.6*)
-      echo "lmsysorg/sglang:nightly-dev-cu13-20260415-2c9e76d3" ;;
-    *Qwen3.8*|*qwen3.8*)
+    qwen38)
       echo "lmsysorg/sglang:dev-qwen38-27b-dflash2" ;;
     *)
       echo "lmsysorg/sglang:dev-qwen38-27b-dflash2" ;;
@@ -83,14 +90,10 @@ resolve_gpu_memory() {
     echo "$SGLANG_GPU_MEM"
     return
   fi
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$model")" in
+    nemotron35)
       echo "0.85" ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      # 0.55 is conservative for the ~43GB NVFP4 checkpoint; 0.60 is safe
-      # once stable. Higher risks unified-memory OOM requiring a power cycle.
-      echo "0.55" ;;
-    *Qwen3.6*|*qwen3.6*)
+    qwen36)
       # 0.60 matches the vLLM Spark recipe; the ~18GB NVFP4 checkpoint
       # leaves ample unified memory for KV cache at native 256K context.
       echo "0.60" ;;
@@ -104,14 +107,12 @@ resolve_gpu_memory() {
 # the best for Qwen3.8-27B.
 resolve_default_speculative_mode() {
   local model="$1"
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$model")" in
+    nemotron35)
       echo "dspark" ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      echo "dflash" ;;
-    *Qwen3.6*|*qwen3.6*)
+    qwen36)
       echo "mtp" ;;
-    *Qwen3.8*|*qwen3.8*)
+    qwen38)
       echo "dflash2" ;;
     *)
       echo "none" ;;
@@ -121,15 +122,13 @@ resolve_default_speculative_mode() {
 # Model-specific default draft model for speculative decoding.
 resolve_default_speculative_model() {
   local model="$1"
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$model")" in
+    nemotron35)
       echo "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark" ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      echo "z-lab/Qwen3-Coder-Next-DFlash" ;;
-    *Qwen3.6*|*qwen3.6*)
+    qwen36)
       # MTP head is baked into the checkpoint; no separate draft model.
       echo "" ;;
-    *Qwen3.8*|*qwen3.8*)
+    qwen38)
       echo "incoai/Qwen3.8-27B-DFlash2" ;;
     *)
       echo "" ;;
@@ -141,22 +140,18 @@ resolve_default_speculative_model() {
 # uses 8.
 resolve_default_speculative_tokens() {
   local model="$1"
-  case "$model" in
-    *Qwen3.6*|*qwen3.6*)
+  case "$(model_profile "$model")" in
+    qwen36)
       echo "3" ;;
     *)
       echo "$ENGINE_DEFAULT_SPECULATIVE_TOKENS" ;;
   esac
 }
 
-# Model-specific default max running requests. Qwen3-Coder-Next's ~43GB
-# checkpoint leaves less unified memory for KV cache, so 4 concurrent
-# requests is the validated safe default.
+# Model-specific default max running requests.
 resolve_max_running_requests() {
   local model="$1"
-  case "$model" in
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      echo "4" ;;
+  case "$(model_profile "$model")" in
     *)
       echo "$ENGINE_DEFAULT_MAX_RUNNING_REQUESTS" ;;
   esac
@@ -171,14 +166,12 @@ resolve_max_running_requests() {
 spec_model_compatible() {
   local target="$1" draft="$2"
   [[ -z "$draft" ]] && return 0
-  case "$target" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$target")" in
+    nemotron35)
       [[ "$draft" == *Nemotron* || "$draft" == *nemotron* ]] && return 0 ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      [[ "$draft" == *Qwen3-Coder-Next* || "$draft" == *qwen3-coder-next* ]] && return 0 ;;
-    *Qwen3.8*|*qwen3.8*)
+    qwen38)
       [[ "$draft" == *Qwen3.8* || "$draft" == *qwen3.8* ]] && return 0 ;;
-    *Qwen3.6*|*qwen3.6*)
+    qwen36)
       [[ "$draft" == *Qwen3.6* || "$draft" == *qwen3.6* ]] && return 0 ;;
   esac
   return 1
@@ -188,10 +181,10 @@ spec_model_compatible() {
 # in common.sh when the engine defines this function).
 resolve_reasoning_parser() {
   local model="$1"
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$model")" in
+    nemotron35)
       echo "nemotron_3" ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*|*Qwen3.6*|*qwen3.6*|*Qwen3.8*|*qwen3.8*)
+    qwen36|qwen38)
       echo "qwen3" ;;
     *)
       echo "" ;;
@@ -245,17 +238,11 @@ engine_run_container() {
   [[ -n "$reasoning_parser" ]] && parser_args+=(--reasoning-parser "$reasoning_parser")
 
   # Architecture-specific flags (e.g. Mamba backend for hybrid models).
-  case "$model" in
-    *Nemotron-3.5-Lightning*|*nemotron-3.5-lightning*)
+  case "$(model_profile "$model")" in
+    nemotron35)
       arch_args=(
         --mamba-backend flashinfer
         --mamba-radix-cache-strategy extra_buffer
-      )
-      ;;
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      arch_args=(
-        --mamba-scheduler-strategy extra_buffer
-        --disable-cuda-graph
       )
       ;;
   esac
@@ -294,16 +281,7 @@ engine_run_container() {
 
   # Model-specific environment variables.
   local env_args=()
-  case "$model" in
-    *Qwen3-Coder-Next*|*qwen3-coder-next*)
-      # DeepGEMM disabled: the scale format of this checkpoint doesn't match
-      # what DeepGEMM expects on Blackwell, causing accuracy degradation.
-      env_args=(
-        -e SGLANG_ENABLE_JIT_DEEPGEMM=0
-        -e SGLANG_ENABLE_DEEP_GEMM=0
-      )
-      ;;
-  esac
+  # No curated profile currently needs additional environment overrides.
 
   # Context length: only pass when explicitly set (SGLang auto-detects the
   # model's native max otherwise).

@@ -20,9 +20,9 @@ ENGINE_DEFAULT_PORT="8000"
 
 ENGINE_DEFAULT_MODEL="unsloth/Qwen3.8-Flash-Next-GGUF:UD-IQ4_XS"
 ENGINE_RECOMMENDED_MODELS=(
-  "unsloth/Qwen3.8-Flash-Next-GGUF:UD-IQ4_XS|~94GB|recommended single-Spark quant; measured full 256K context at ~27 tok/s"
-  "unsloth/Qwen3.8-Flash-Next-GGUF:UD-Q3_K_XL|~90GB|more memory headroom and lower quality"
-  "unsloth/Qwen3.8-Flash-Next-GGUF:UD-Q2_K_XL|~79GB|smaller and faster-loading Flash-Next quant"
+  "Qwen3.8 Flash-Next GGUF|unsloth/Qwen3.8-Flash-Next-GGUF:UD-IQ4_XS|~94GB|recommended single-Spark quant; measured full 256K context at ~27 tok/s"
+  "Qwen3.8 Flash-Next GGUF|unsloth/Qwen3.8-Flash-Next-GGUF:UD-Q3_K_XL|~90GB|more memory headroom and lower quality"
+  "Qwen3.8 Flash-Next GGUF|unsloth/Qwen3.8-Flash-Next-GGUF:UD-Q2_K_XL|~79GB|smaller and faster-loading Flash-Next quant"
 )
 
 resolve_default_context_override() {
